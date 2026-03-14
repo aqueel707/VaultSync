@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VaultSync — My Files</title>
+  <link rel="stylesheet" href="../assets/css/style.css" />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <div class="bg-grid" aria-hidden="true"></div>
+
+  <div class="page-app">
+
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <span class="brand-icon">⬡</span>
+        <span class="brand-name">VaultSync</span>
+      </div>
+      <nav class="sidebar-nav">
+        <a href="dashboard.html" class="nav-item"><span class="nav-icon">⌂</span> Dashboard</a>
+        <a href="upload.html"    class="nav-item"><span class="nav-icon">↑</span> Upload</a>
+        <a href="files.html"     class="nav-item active"><span class="nav-icon">▤</span> My Files</a>
+        <a href="settings.html"  class="nav-item"><span class="nav-icon">⚙</span> Settings</a>
+      </nav>
+      <div class="sidebar-footer">
+        <span id="storage-badge" class="storage-badge managed">App Storage</span>
+        <p id="user-email" class="user-email"></p>
+        <button id="btn-logout" class="btn btn-ghost btn-sm">Sign out</button>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <main class="main-content">
+      <header class="view-header">
+        <div>
+          <h1>My Encrypted Files</h1>
+          <p class="view-subtitle">Select a file, enter your password, and decrypt it locally.</p>
+        </div>
+        <button id="btn-refresh" class="btn btn-ghost btn-sm">↺ Refresh</button>
+      </header>
+
+      <!-- File list -->
+      <div id="file-list" class="file-list">
+        <p class="loading-msg">Loading…</p>
+      </div>
+
+      <!-- Decrypt / download panel (hidden until a file is selected) -->
+      <div id="download-panel" class="download-panel" hidden>
+        <div class="panel-header">
+          <span id="dl-filename" class="dl-filename"></span>
+          <button id="btn-close-panel" class="icon-btn" aria-label="Close">✕</button>
+        </div>
+
+        <div class="field">
+          <label for="dec-password">Decryption Password</label>
+          <div class="password-wrap">
+            <input type="password" id="dec-password"
+                   placeholder="Enter the passphrase used during upload…"
+                   autocomplete="off" />
+            <button class="toggle-pass" id="toggle-dec-pass" aria-label="Show password">👁</button>
+          </div>
+        </div>
+
+        <div class="panel-actions">
+          <button id="btn-download" class="btn btn-primary">
+            <span class="btn-label">🔓 Decrypt &amp; Download</span>
+            <span class="btn-spinner" hidden>⟳</span>
+          </button>
+          <button id="btn-delete" class="btn btn-danger">✕ Delete</button>
+        </div>
+
+        <p id="dl-error" class="error-msg" hidden></p>
+      </div>
+
+    </main>
+  </div>
+
+  <script type="module" src="../assets/js/download.js"></script>
+
+  <!-- Mobile bottom navigation (visible only on small screens) -->
+  <nav class="mobile-nav" aria-label="Mobile navigation">
+    <a href="dashboard.html"><span class="mobile-nav-icon">⌂</span>Home</a>
+    <a href="upload.html"><span class="mobile-nav-icon">↑</span>Upload</a>
+    <a href="files.html" class="active"><span class="mobile-nav-icon">▤</span>Files</a>
+    <a href="settings.html"><span class="mobile-nav-icon">⚙</span>Settings</a>
+  </nav>
+</body>
+</html>

@@ -1,0 +1,33 @@
+# ── Node / package managers ──────────────────────────────────────────
+node_modules/
+.npm
+.yarn-integrity
+package-lock.json
+yarn.lock
+
+# ── Firebase CLI ─────────────────────────────────────────────────────
+.firebase/
+firebase-debug.log
+firestore-debug.log
+storage-debug.log
+ui-debug.log
+.firebaserc          # optional: commit if you want to share project alias
+
+# ── Environment / secrets ────────────────────────────────────────────
+# If you ever move Firebase config to a .env file, exclude it here:
+.env
+.env.local
+.env.*.local
+
+# ── IDE & OS ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Build artefacts ──────────────────────────────────────────────────
+dist/
+build/

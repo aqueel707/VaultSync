@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VaultSync — Settings</title>
+  <link rel="stylesheet" href="../assets/css/style.css" />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <div class="bg-grid" aria-hidden="true"></div>
+
+  <div class="page-app">
+
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <span class="brand-icon">⬡</span>
+        <span class="brand-name">VaultSync</span>
+      </div>
+      <nav class="sidebar-nav">
+        <a href="dashboard.html" class="nav-item"><span class="nav-icon">⌂</span> Dashboard</a>
+        <a href="upload.html"    class="nav-item"><span class="nav-icon">↑</span> Upload</a>
+        <a href="files.html"     class="nav-item"><span class="nav-icon">▤</span> My Files</a>
+        <a href="settings.html"  class="nav-item active"><span class="nav-icon">⚙</span> Settings</a>
+      </nav>
+      <div class="sidebar-footer">
+        <span id="storage-badge" class="storage-badge managed">App Storage</span>
+        <p id="user-email" class="user-email"></p>
+        <button id="btn-logout" class="btn btn-ghost btn-sm">Sign out</button>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <main class="main-content">
+      <header class="view-header">
+        <div>
+          <h1>Storage Settings</h1>
+          <p class="view-subtitle">Choose where your encrypted files are stored.</p>
+        </div>
+      </header>
+
+      <!-- Storage mode selector -->
+      <div class="panel">
+        <h2 class="settings-section-title">Storage Provider</h2>
+        <p class="settings-section-desc">
+          Encryption is identical in both modes — only the destination bucket changes.
+          Your choice is saved in <code>localStorage</code> and persists across sessions.
+        </p>
+
+        <div class="storage-option">
+          <label class="storage-option-label">
+            <input type="radio" name="storage-mode" value="managed" />
+            <div class="storage-option-body">
+              <div class="storage-option-title">
+                <span class="option-icon">☁</span>
+                App Storage
+                <span class="option-tag recommended">Default</span>
+              </div>
+              <p class="storage-option-desc">
+                Files are stored in the application's Firebase bucket.
+                No extra setup required.
+              </p>
+            </div>
+          </label>
+        </div>
+
+        <div class="storage-option">
+          <label class="storage-option-label">
+            <input type="radio" name="storage-mode" value="user" />
+            <div class="storage-option-body">
+              <div class="storage-option-title">
+                <span class="option-icon">🔑</span>
+                My Firebase Storage
+                <span class="option-tag">Self-hosted</span>
+              </div>
+              <p class="storage-option-desc">
+                Files go to your own Firebase project. You own the bucket
+                and the app owner has zero access to your data.
+              </p>
+            </div>
+          </label>
+        </div>
+      </div>
+
+      <!-- User Firebase config form (shown only in "user" mode) -->
+      <div id="user-config-panel" class="panel" hidden>
+        <h2 class="settings-section-title">Your Firebase Configuration</h2>
+        <p class="settings-section-desc">
+          Find these values in your Firebase console under
+          <strong>Project Settings → General → Your apps → SDK setup and configuration</strong>.
+        </p>
+
+        <div class="config-grid">
+          <div class="field">
+            <label for="cfg-apiKey">API Key</label>
+            <input type="text" id="cfg-apiKey" placeholder="AIzaSy…" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label for="cfg-authDomain">Auth Domain</label>
+            <input type="text" id="cfg-authDomain" placeholder="your-project.firebaseapp.com" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label for="cfg-projectId">Project ID</label>
+            <input type="text" id="cfg-projectId" placeholder="your-project-id" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label for="cfg-storageBucket">Storage Bucket</label>
+            <input type="text" id="cfg-storageBucket" placeholder="your-project.appspot.com" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label for="cfg-appId">App ID</label>
+            <input type="text" id="cfg-appId" placeholder="1:123456789:web:abc123" autocomplete="off" spellcheck="false" />
+          </div>
+        </div>
+
+        <button id="btn-save-config" class="btn btn-primary">
+          <span class="btn-label">⚡ Save &amp; Connect</span>
+          <span class="btn-spinner" hidden>⟳</span>
+        </button>
+
+        <p id="config-status" class="config-status" hidden></p>
+
+        <div class="config-note">
+          <strong>Privacy:</strong> Your Firebase config is saved in
+          <code>localStorage</code> on this device only. It is never sent
+          to any server other than Google's Firebase services.
+        </div>
+      </div>
+
+    </main>
+  </div>
+
+  <script type="module">
+    import { requireAuth, navigateTo, markLoggedOut } from "../assets/js/router.js";
+    import { logoutUser }      from "../assets/js/auth.js";
+    import * as storageManager from "../assets/js/storage-manager.js";
+
+    // ── Boot ────────────────────────────────────────────────────────────
+    const user = await requireAuth("login.html");
+    await storageManager.initFromStorage();
+
+    // ── DOM refs ────────────────────────────────────────────────────────
+    const $ = (id) => document.getElementById(id);
+
+    const radios          = document.querySelectorAll('input[name="storage-mode"]');
+    const userConfigPanel = $("user-config-panel");
+    const btnSaveConfig   = $("btn-save-config");
+    const configStatus    = $("config-status");
+    const storageBadgeEl  = $("storage-badge");
+    const userEmailEl     = $("user-email");
+    const btnLogout       = $("btn-logout");
+
+    const cfgFields = {
+      apiKey:        $("cfg-apiKey"),
+      authDomain:    $("cfg-authDomain"),
+      projectId:     $("cfg-projectId"),
+      storageBucket: $("cfg-storageBucket"),
+      appId:         $("cfg-appId"),
+    };
+
+    // ── Populate sidebar ────────────────────────────────────────────────
+    userEmailEl.textContent = user.email;
+    updateBadge();
+
+    // ── Restore saved state into form ───────────────────────────────────
+    const currentMode = storageManager.getMode();
+    radios.forEach((r) => { r.checked = r.value === currentMode; });
+    userConfigPanel.hidden = currentMode !== "user";
+
+    const savedCfg = storageManager.loadUserConfig();
+    if (savedCfg) {
+      Object.entries(savedCfg).forEach(([k, v]) => {
+        if (cfgFields[k]) cfgFields[k].value = v ?? "";
+      });
+    }
+
+    // ── Radio change ────────────────────────────────────────────────────
+    radios.forEach((radio) => {
+      radio.addEventListener("change", () => {
+        const mode = radio.value;
+        userConfigPanel.hidden = mode !== "user";
+        showConfigStatus("", "");
+
+        if (mode === "managed") {
+          storageManager.setMode("managed");
+          updateBadge();
+          showConfigStatus("Switched to App Storage.", "success");
+        }
+        // "user" mode is only activated after config is saved & connected
+      });
+    });
+
+    // ── Save config ─────────────────────────────────────────────────────
+    btnSaveConfig.addEventListener("click", async () => {
+      const cfg = {
+        apiKey:        cfgFields.apiKey.value.trim(),
+        authDomain:    cfgFields.authDomain.value.trim(),
+        projectId:     cfgFields.projectId.value.trim(),
+        storageBucket: cfgFields.storageBucket.value.trim(),
+        appId:         cfgFields.appId.value.trim(),
+      };
+
+      const missing = Object.entries(cfg).filter(([, v]) => !v).map(([k]) => k);
+      if (missing.length) {
+        showConfigStatus(`Missing fields: ${missing.join(", ")}`, "error");
+        return;
+      }
+
+      setLoading(btnSaveConfig, true);
+      showConfigStatus("Connecting to your Firebase project…", "info");
+
+      try {
+        await storageManager.initUserProvider(cfg);
+        storageManager.setMode("user");
+        storageManager.saveUserConfig(cfg);
+        updateBadge();
+        showConfigStatus("✓ Connected to your Firebase Storage.", "success");
+      } catch (err) {
+        console.error("Config connect error:", err);
+        showConfigStatus(`Failed to connect: ${err.message}`, "error");
+        // Revert radio to managed
+        radios.forEach((r) => { r.checked = r.value === "managed"; });
+        userConfigPanel.hidden = true;
+        storageManager.setMode("managed");
+        updateBadge();
+      } finally {
+        setLoading(btnSaveConfig, false);
+      }
+    });
+
+    // ── Helpers ─────────────────────────────────────────────────────────
+    function setLoading(btn, loading) {
+      btn.querySelector(".btn-label").hidden   = loading;
+      btn.querySelector(".btn-spinner").hidden = !loading;
+      btn.disabled = loading;
+    }
+
+    function showConfigStatus(msg, type) {
+      configStatus.textContent = msg;
+      configStatus.className   = `config-status ${type}`;
+      configStatus.hidden      = !msg;
+    }
+
+    function updateBadge() {
+      const mode = storageManager.getMode();
+      storageBadgeEl.textContent = mode === "user" ? "Your Storage" : "App Storage";
+      storageBadgeEl.className   = `storage-badge ${mode}`;
+    }
+
+    // ── Logout ───────────────────────────────────────────────────────────
+    btnLogout.addEventListener("click", async () => {
+      await logoutUser();
+      markLoggedOut();
+      navigateTo("login.html");
+    });
+  </script>
+
+  <!-- Mobile bottom navigation (visible only on small screens) -->
+  <nav class="mobile-nav" aria-label="Mobile navigation">
+    <a href="dashboard.html"><span class="mobile-nav-icon">⌂</span>Home</a>
+    <a href="upload.html"><span class="mobile-nav-icon">↑</span>Upload</a>
+    <a href="files.html"><span class="mobile-nav-icon">▤</span>Files</a>
+    <a href="settings.html" class="active"><span class="mobile-nav-icon">⚙</span>Settings</a>
+  </nav>
+</body>
+</html>

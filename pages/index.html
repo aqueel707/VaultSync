@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VaultSync — Loading</title>
+  <link rel="stylesheet" href="../assets/css/style.css" />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <div class="bg-grid" aria-hidden="true"></div>
+
+  <div class="redirect-page">
+    <span class="redirect-spinner">⬡</span>
+    <p>Checking authentication…</p>
+  </div>
+
+  <script type="module">
+    /**
+     * index.html
+     * ──────────
+     * Entry point. Waits for Firebase auth to resolve, then routes:
+     *   Logged in  → dashboard.html
+     *   Logged out → login.html
+     */
+    import { redirectIfAuthed, navigateTo } from "../assets/js/router.js";
+
+    const user = await redirectIfAuthed("dashboard.html");
+    // If we reach here, user is null (not authed)
+    navigateTo("login.html");
+  </script>
+</body>
+</html>

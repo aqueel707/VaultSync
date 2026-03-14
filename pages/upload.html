@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VaultSync — Upload</title>
+  <link rel="stylesheet" href="../assets/css/style.css" />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <div class="bg-grid" aria-hidden="true"></div>
+
+  <div class="page-app">
+
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <span class="brand-icon">⬡</span>
+        <span class="brand-name">VaultSync</span>
+      </div>
+      <nav class="sidebar-nav">
+        <a href="dashboard.html" class="nav-item"><span class="nav-icon">⌂</span> Dashboard</a>
+        <a href="upload.html"    class="nav-item active"><span class="nav-icon">↑</span> Upload</a>
+        <a href="files.html"     class="nav-item"><span class="nav-icon">▤</span> My Files</a>
+        <a href="settings.html"  class="nav-item"><span class="nav-icon">⚙</span> Settings</a>
+      </nav>
+      <div class="sidebar-footer">
+        <span id="storage-badge" class="storage-badge managed">App Storage</span>
+        <p id="user-email" class="user-email"></p>
+        <button id="btn-logout" class="btn btn-ghost btn-sm">Sign out</button>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <main class="main-content">
+      <header class="view-header">
+        <div>
+          <h1>Upload &amp; Encrypt</h1>
+          <p class="view-subtitle">Files are encrypted in your browser — the server never sees plaintext.</p>
+        </div>
+      </header>
+
+      <!-- Drop zone -->
+      <div class="upload-area" id="drop-zone">
+        <input type="file" id="file-input" class="visually-hidden" multiple />
+        <div class="drop-icon">⊕</div>
+        <p class="drop-text">Drop files here or <label for="file-input" class="inline-link">browse</label></p>
+        <p class="drop-hint">Any file type · Max 50 MB per file</p>
+        <div id="selected-files" class="selected-files"></div>
+      </div>
+
+      <!-- Encrypt panel -->
+      <div class="panel">
+        <div class="field">
+          <label for="enc-password">
+            Encryption Password
+            <span class="label-hint">(used only in your browser)</span>
+          </label>
+          <div class="password-wrap">
+            <input type="password" id="enc-password" placeholder="Enter a strong passphrase…" autocomplete="off" />
+            <button class="toggle-pass" id="toggle-enc-pass" aria-label="Show password">👁</button>
+          </div>
+        </div>
+
+        <div class="strength-bar-wrap" id="strength-wrap" hidden>
+          <div class="strength-bar">
+            <div id="strength-fill" class="strength-fill"></div>
+          </div>
+          <span id="strength-label" class="strength-label"></span>
+        </div>
+
+        <button id="btn-upload" class="btn btn-primary" disabled>
+          <span class="btn-label">🔒 Encrypt &amp; Upload</span>
+          <span class="btn-spinner" hidden>⟳</span>
+        </button>
+      </div>
+
+      <!-- Progress -->
+      <div id="upload-progress" class="progress-section" hidden>
+        <div class="progress-track">
+          <div id="progress-fill" class="progress-fill"></div>
+        </div>
+        <p id="progress-label" class="progress-label"></p>
+      </div>
+
+      <!-- Toast -->
+      <div id="status-toast" class="toast" hidden></div>
+
+    </main>
+  </div>
+
+  <script type="module" src="../assets/js/upload.js"></script>
+
+  <!-- Mobile bottom navigation (visible only on small screens) -->
+  <nav class="mobile-nav" aria-label="Mobile navigation">
+    <a href="dashboard.html"><span class="mobile-nav-icon">⌂</span>Home</a>
+    <a href="upload.html" class="active"><span class="mobile-nav-icon">↑</span>Upload</a>
+    <a href="files.html"><span class="mobile-nav-icon">▤</span>Files</a>
+    <a href="settings.html"><span class="mobile-nav-icon">⚙</span>Settings</a>
+  </nav>
+</body>
+</html>

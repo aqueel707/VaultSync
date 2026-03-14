@@ -1,0 +1,45 @@
+// firebase/storage.rules
+// ──────────────────────
+// Firebase Storage security rules for VaultSync.
+//
+// Policy:
+//   • Only authenticated users can read or write objects.
+//   • Each user can only access objects under their own UID namespace.
+//   • Maximum individual file size is 55 MB (covers 50 MB plaintext + AES-GCM overhead).
+//   • Metadata JSON files are capped at 4 KB.
+
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // ── User file namespace ──────────────────────────────────────────────
+    match /users/{userId}/files/{filename} {
+
+      // Helper: is the requesting user authenticated as this userId?
+      function isOwner() {
+        return request.auth != null && request.auth.uid == userId;
+      }
+
+      // Encrypted file blobs  (.enc)
+      allow read:  if isOwner();
+      allow write: if isOwner()
+                   && request.resource.size <= 55 * 1024 * 1024  // 55 MB max
+                   && (
+                        // Allow encrypted blobs
+                        filename.matches('.*\\.enc')
+                        ||
+                        // Allow metadata JSON (max 4 KB)
+                        (filename.matches('.*\\.meta\\.json')
+                         && request.resource.size <= 4 * 1024)
+                      );
+
+      allow delete: if isOwner();
+    }
+
+    // ── Deny everything else ─────────────────────────────────────────────
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
