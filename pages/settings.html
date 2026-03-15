@@ -58,7 +58,7 @@
                 <span class="option-tag recommended">Default</span>
               </div>
               <p class="storage-option-desc">
-                Files are stored in the application's Firebase bucket.
+                Files are stored in the application's Supabase bucket.
                 No extra setup required.
               </p>
             </div>
@@ -71,11 +71,11 @@
             <div class="storage-option-body">
               <div class="storage-option-title">
                 <span class="option-icon">🔑</span>
-                My Firebase Storage
+                My Supabase Storage
                 <span class="option-tag">Self-hosted</span>
               </div>
               <p class="storage-option-desc">
-                Files go to your own Firebase project. You own the bucket
+                Files go to your own Supabase project. You own the bucket
                 and the app owner has zero access to your data.
               </p>
             </div>
@@ -83,34 +83,33 @@
         </div>
       </div>
 
-      <!-- User Firebase config form (shown only in "user" mode) -->
+      <!-- User Supabase config form (shown only in "user" mode) -->
       <div id="user-config-panel" class="panel" hidden>
-        <h2 class="settings-section-title">Your Firebase Configuration</h2>
+        <h2 class="settings-section-title">Your Supabase Configuration</h2>
         <p class="settings-section-desc">
-          Find these values in your Firebase console under
-          <strong>Project Settings → General → Your apps → SDK setup and configuration</strong>.
+          Find these values in your Supabase dashboard under
+          <strong>Project Settings → API</strong>.
+          Create a storage bucket named <code>vaultsync</code> (or any name — enter it below).
         </p>
 
         <div class="config-grid">
           <div class="field">
-            <label for="cfg-apiKey">API Key</label>
-            <input type="text" id="cfg-apiKey" placeholder="AIzaSy…" autocomplete="off" spellcheck="false" />
+            <label for="cfg-supabaseUrl">Project URL</label>
+            <input type="text" id="cfg-supabaseUrl"
+                   placeholder="https://xxxx.supabase.co"
+                   autocomplete="off" spellcheck="false" />
           </div>
           <div class="field">
-            <label for="cfg-authDomain">Auth Domain</label>
-            <input type="text" id="cfg-authDomain" placeholder="your-project.firebaseapp.com" autocomplete="off" spellcheck="false" />
+            <label for="cfg-supabaseAnonKey">Anon / Public Key</label>
+            <input type="text" id="cfg-supabaseAnonKey"
+                   placeholder="eyJhbGci…"
+                   autocomplete="off" spellcheck="false" />
           </div>
           <div class="field">
-            <label for="cfg-projectId">Project ID</label>
-            <input type="text" id="cfg-projectId" placeholder="your-project-id" autocomplete="off" spellcheck="false" />
-          </div>
-          <div class="field">
-            <label for="cfg-storageBucket">Storage Bucket</label>
-            <input type="text" id="cfg-storageBucket" placeholder="your-project.appspot.com" autocomplete="off" spellcheck="false" />
-          </div>
-          <div class="field">
-            <label for="cfg-appId">App ID</label>
-            <input type="text" id="cfg-appId" placeholder="1:123456789:web:abc123" autocomplete="off" spellcheck="false" />
+            <label for="cfg-bucket">Bucket Name</label>
+            <input type="text" id="cfg-bucket"
+                   placeholder="vaultsync"
+                   autocomplete="off" spellcheck="false" />
           </div>
         </div>
 
@@ -122,9 +121,9 @@
         <p id="config-status" class="config-status" hidden></p>
 
         <div class="config-note">
-          <strong>Privacy:</strong> Your Firebase config is saved in
+          <strong>Privacy:</strong> Your Supabase config is saved in
           <code>localStorage</code> on this device only. It is never sent
-          to any server other than Google's Firebase services.
+          to any server other than your own Supabase project.
         </div>
       </div>
 
@@ -152,11 +151,9 @@
     const btnLogout       = $("btn-logout");
 
     const cfgFields = {
-      apiKey:        $("cfg-apiKey"),
-      authDomain:    $("cfg-authDomain"),
-      projectId:     $("cfg-projectId"),
-      storageBucket: $("cfg-storageBucket"),
-      appId:         $("cfg-appId"),
+      supabaseUrl:     $("cfg-supabaseUrl"),
+      supabaseAnonKey: $("cfg-supabaseAnonKey"),
+      bucket:          $("cfg-bucket"),
     };
 
     // ── Populate sidebar ────────────────────────────────────────────────
@@ -187,39 +184,36 @@
           updateBadge();
           showConfigStatus("Switched to App Storage.", "success");
         }
-        // "user" mode is only activated after config is saved & connected
       });
     });
 
     // ── Save config ─────────────────────────────────────────────────────
     btnSaveConfig.addEventListener("click", async () => {
       const cfg = {
-        apiKey:        cfgFields.apiKey.value.trim(),
-        authDomain:    cfgFields.authDomain.value.trim(),
-        projectId:     cfgFields.projectId.value.trim(),
-        storageBucket: cfgFields.storageBucket.value.trim(),
-        appId:         cfgFields.appId.value.trim(),
+        supabaseUrl:     cfgFields.supabaseUrl.value.trim(),
+        supabaseAnonKey: cfgFields.supabaseAnonKey.value.trim(),
+        bucket:          cfgFields.bucket.value.trim() || "vaultsync",
       };
 
-      const missing = Object.entries(cfg).filter(([, v]) => !v).map(([k]) => k);
+      const missing = ["supabaseUrl", "supabaseAnonKey"].filter((k) => !cfg[k]);
+
       if (missing.length) {
         showConfigStatus(`Missing fields: ${missing.join(", ")}`, "error");
         return;
       }
 
       setLoading(btnSaveConfig, true);
-      showConfigStatus("Connecting to your Firebase project…", "info");
+      showConfigStatus("Connecting to your Supabase project…", "info");
 
       try {
         await storageManager.initUserProvider(cfg);
         storageManager.setMode("user");
         storageManager.saveUserConfig(cfg);
         updateBadge();
-        showConfigStatus("✓ Connected to your Firebase Storage.", "success");
+        showConfigStatus("✓ Connected to your Supabase Storage.", "success");
       } catch (err) {
         console.error("Config connect error:", err);
         showConfigStatus(`Failed to connect: ${err.message}`, "error");
-        // Revert radio to managed
         radios.forEach((r) => { r.checked = r.value === "managed"; });
         userConfigPanel.hidden = true;
         storageManager.setMode("managed");
@@ -256,7 +250,7 @@
     });
   </script>
 
-  <!-- Mobile bottom navigation (visible only on small screens) -->
+  <!-- Mobile bottom navigation -->
   <nav class="mobile-nav" aria-label="Mobile navigation">
     <a href="dashboard.html"><span class="mobile-nav-icon">⌂</span>Home</a>
     <a href="upload.html"><span class="mobile-nav-icon">↑</span>Upload</a>

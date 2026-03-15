@@ -2,88 +2,126 @@
  * firebase-managed.js
  * ────────────────────
  * Storage provider for MANAGED mode.
- * Uses the application's own Firebase project (firebase-config.js).
  *
- * Exposes the same interface as firebase-user.js so storage-manager.js
- * can swap providers transparently.
+ * CHANGED: Firebase Storage replaced with Supabase Storage.
+ * Firebase Authentication is NOT touched — auth.js still owns that.
  *
- * UNCHANGED from original — only the import path for firebase-config was
- * updated to reflect the new directory structure.
+ * Uses the app-level Supabase client from supabase-client.js.
+ * Exposes the SAME 4-function interface as before so storage-manager.js
+ * requires zero changes to its provider-selection logic:
+ *
+ *   uploadEncryptedFile(uid, storageKey, ciphertext, metadata, onProgress?)
+ *   listUserFiles(uid)
+ *   downloadEncryptedFile(uid, storageKey)
+ *   deleteFile(uid, storageKey)
+ *
+ * Storage paths (unchanged):
+ *   users/<uid>/files/<storageKey>.enc
+ *   users/<uid>/files/<storageKey>.meta.json
  */
 
-import { initializeApp, getApps } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import {
-  getStorage,
-  ref,
-  uploadBytes,
-  getDownloadURL,
-  listAll,
-  deleteObject,
-} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
+import { supabase, BUCKET } from "./supabase-client.js";
 
-import { firebaseConfig } from "./firebase-config.js";
+// ─── Path helpers ─────────────────────────────────────────────────────────
 
-function getManagedStorage() {
-  const existing = getApps().find((a) => a.name === "[DEFAULT]");
-  const app = existing ?? initializeApp(firebaseConfig);
-  return getStorage(app);
+function encPath(uid, storageKey) {
+  return `users/${uid}/files/${storageKey}.enc`;
+}
+function metaPath(uid, storageKey) {
+  return `users/${uid}/files/${storageKey}.meta.json`;
 }
 
-function encPath(uid, storageKey)  { return `users/${uid}/files/${storageKey}.enc`; }
-function metaPath(uid, storageKey) { return `users/${uid}/files/${storageKey}.meta.json`; }
+// ─── Upload ───────────────────────────────────────────────────────────────
 
 export async function uploadEncryptedFile(uid, storageKey, ciphertext, metadata, onProgress) {
-  const storage = getManagedStorage();
   onProgress?.(10, "Uploading encrypted file…");
-  await uploadBytes(ref(storage, encPath(uid, storageKey)),
-    new Blob([ciphertext], { type: "application/octet-stream" }));
+  const { error: encErr } = await supabase.storage
+    .from(BUCKET)
+    .upload(
+      encPath(uid, storageKey),
+      new Blob([ciphertext], { type: "application/octet-stream" }),
+      { upsert: true },
+    );
+  if (encErr) throw new Error(`Supabase upload failed: ${encErr.message}`);
+
   onProgress?.(70, "Uploading metadata…");
-  await uploadBytes(ref(storage, metaPath(uid, storageKey)),
-    new Blob([JSON.stringify(metadata, null, 2)], { type: "application/json" }));
+  const { error: metaErr } = await supabase.storage
+    .from(BUCKET)
+    .upload(
+      metaPath(uid, storageKey),
+      new Blob([JSON.stringify(metadata, null, 2)], { type: "application/json" }),
+      { upsert: true },
+    );
+  if (metaErr) throw new Error(`Supabase metadata upload failed: ${metaErr.message}`);
+
   onProgress?.(100, "Upload complete.");
 }
 
+// ─── List ─────────────────────────────────────────────────────────────────
+
 export async function listUserFiles(uid) {
-  const storage   = getManagedStorage();
-  const folderRef = ref(storage, `users/${uid}/files/`);
-  const result    = await listAll(folderRef);
-  const metaItems = result.items.filter((i) => i.name.endsWith(".meta.json"));
+  const folder = `users/${uid}/files`;
 
-  const files = await Promise.all(metaItems.map(async (item) => {
-    try {
-      const url      = await getDownloadURL(item);
-      const metadata = await (await fetch(url)).json();
-      return { storageKey: item.name.replace(".meta.json", ""), metadata };
-    } catch (err) {
-      console.warn("Managed: could not load metadata for", item.name, err);
-      return null;
-    }
-  }));
+  const { data, error } = await supabase.storage
+    .from(BUCKET)
+    .list(folder, { limit: 1000, offset: 0 });
 
-  return files.filter(Boolean)
+  if (error) throw new Error(`Supabase list failed: ${error.message}`);
+  if (!data?.length) return [];
+
+  const metaItems = data.filter((item) => item.name.endsWith(".meta.json"));
+
+  const files = await Promise.all(
+    metaItems.map(async (item) => {
+      try {
+        const filePath = `${folder}/${item.name}`;
+        const { data: urlData, error: urlErr } = await supabase.storage
+          .from(BUCKET)
+          .createSignedUrl(filePath, 60);
+
+        if (urlErr) throw urlErr;
+
+        const resp = await fetch(urlData.signedUrl);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const metadata = await resp.json();
+
+        const storageKey = item.name.replace(".meta.json", "");
+        return { storageKey, metadata };
+      } catch (err) {
+        console.warn("Managed: could not load metadata for", item.name, err);
+        return null;
+      }
+    }),
+  );
+
+  return files
+    .filter(Boolean)
     .sort((a, b) => new Date(b.metadata.timestamp) - new Date(a.metadata.timestamp));
 }
 
+// ─── Download ─────────────────────────────────────────────────────────────
+
 export async function downloadEncryptedFile(uid, storageKey) {
-  const storage = getManagedStorage();
+  const { data: encData, error: encErr } = await supabase.storage
+    .from(BUCKET)
+    .download(encPath(uid, storageKey));
+  if (encErr) throw new Error(`Failed to download encrypted file: ${encErr.message}`);
+  const ciphertext = await encData.arrayBuffer();
 
-  const encUrl  = await getDownloadURL(ref(storage, encPath(uid, storageKey)));
-  const encResp = await fetch(encUrl);
-  if (!encResp.ok) throw new Error("Failed to download encrypted file.");
-  const ciphertext = await encResp.arrayBuffer();
-
-  const metaUrl  = await getDownloadURL(ref(storage, metaPath(uid, storageKey)));
-  const metaResp = await fetch(metaUrl);
-  if (!metaResp.ok) throw new Error("Failed to download file metadata.");
-  const metadata = await metaResp.json();
+  const { data: metaData, error: metaErr } = await supabase.storage
+    .from(BUCKET)
+    .download(metaPath(uid, storageKey));
+  if (metaErr) throw new Error(`Failed to download file metadata: ${metaErr.message}`);
+  const metadata = JSON.parse(await metaData.text());
 
   return { ciphertext, metadata };
 }
 
+// ─── Delete ───────────────────────────────────────────────────────────────
+
 export async function deleteFile(uid, storageKey) {
-  const storage = getManagedStorage();
-  await Promise.all([
-    deleteObject(ref(storage, encPath(uid, storageKey))),
-    deleteObject(ref(storage, metaPath(uid, storageKey))),
-  ]);
+  const { error } = await supabase.storage
+    .from(BUCKET)
+    .remove([encPath(uid, storageKey), metaPath(uid, storageKey)]);
+  if (error) throw new Error(`Supabase delete failed: ${error.message}`);
 }
