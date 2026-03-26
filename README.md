@@ -4,7 +4,7 @@
 > before they ever reach the cloud. The server never sees your plaintext data or
 > encryption keys — ever.
 
-🔗 **Live Demo:** https://aqueel707.github.io/VaultSync/
+🔗 **Live Demo:** https://aqueel707.github.io/VaultSync/pages/login.html
 
 ---
 
