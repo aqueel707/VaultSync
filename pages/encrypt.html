@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VaultSync — Encrypt & Export</title>
+  <link rel="stylesheet" href="../assets/css/style.css" />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <div class="bg-grid" aria-hidden="true"></div>
+
+  <div class="page-app">
+
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <span class="brand-icon">⬡</span>
+        <span class="brand-name">VaultSync</span>
+      </div>
+      <nav class="sidebar-nav">
+        <a href="dashboard.html"  class="nav-item"><span class="nav-icon">⌂</span> Dashboard</a>
+        <a href="upload.html"     class="nav-item"><span class="nav-icon">↑</span> Upload</a>
+        <a href="files.html"      class="nav-item"><span class="nav-icon">▤</span> My Files</a>
+        <a href="encrypt.html"    class="nav-item active"><span class="nav-icon">🔒</span> Encrypt & Export</a>
+        <a href="decrypt.html"    class="nav-item"><span class="nav-icon">🔓</span> Decrypt Local</a>
+        <a href="settings.html"   class="nav-item"><span class="nav-icon">⚙</span> Settings</a>
+      </nav>
+      <div class="sidebar-footer">
+        <span id="storage-badge" class="storage-badge managed">App Storage</span>
+        <p id="user-email" class="user-email"></p>
+        <button id="btn-logout" class="btn btn-ghost btn-sm">Sign out</button>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <main class="main-content">
+      <header class="view-header">
+        <div>
+          <h1>Encrypt &amp; Export</h1>
+          <p class="view-subtitle">
+            Encrypt a file locally and download it to your device.
+            Save the two files anywhere — Google Drive, Dropbox, USB, email.
+            No cloud account needed.
+          </p>
+        </div>
+      </header>
+
+      <!-- How it works banner -->
+      <div class="info-banner">
+        <div class="info-step">
+          <span class="info-step-num">1</span>
+          <span>Select a file &amp; enter a password</span>
+        </div>
+        <div class="info-arrow">→</div>
+        <div class="info-step">
+          <span class="info-step-num">2</span>
+          <span>Browser encrypts locally</span>
+        </div>
+        <div class="info-arrow">→</div>
+        <div class="info-step">
+          <span class="info-step-num">3</span>
+          <span>Download <code>.enc</code> + <code>.meta.json</code></span>
+        </div>
+        <div class="info-arrow">→</div>
+        <div class="info-step">
+          <span class="info-step-num">4</span>
+          <span>Save anywhere you want</span>
+        </div>
+      </div>
+
+      <!-- Drop zone -->
+      <div class="upload-area" id="drop-zone">
+        <input type="file" id="file-input" class="visually-hidden" />
+        <div class="drop-icon">⊕</div>
+        <p class="drop-text">Drop a file here or <label for="file-input" class="inline-link">browse</label></p>
+        <p class="drop-hint">Any file type · Encrypted entirely in your browser</p>
+        <div id="selected-files" class="selected-files"></div>
+      </div>
+
+      <!-- Encrypt panel -->
+      <div class="panel">
+        <div class="field">
+          <label for="enc-password">
+            Encryption Password
+            <span class="label-hint">(remember this — you need it to decrypt)</span>
+          </label>
+          <div class="password-wrap">
+            <input type="password" id="enc-password"
+                   placeholder="Enter a strong passphrase…"
+                   autocomplete="off" />
+            <button class="toggle-pass" id="toggle-enc-pass" aria-label="Show password">👁</button>
+          </div>
+        </div>
+
+        <div class="strength-bar-wrap" id="strength-wrap" hidden>
+          <div class="strength-bar">
+            <div id="strength-fill" class="strength-fill"></div>
+          </div>
+          <span id="strength-label" class="strength-label"></span>
+        </div>
+
+        <button id="btn-encrypt" class="btn btn-primary" disabled>
+          <span class="btn-label">🔒 Encrypt &amp; Download</span>
+          <span class="btn-spinner" hidden>⟳</span>
+        </button>
+      </div>
+
+      <!-- Status -->
+      <div id="status-toast" class="toast" hidden></div>
+
+      <!-- Output info (shown after encryption) -->
+      <div id="output-panel" class="panel" hidden>
+        <h2 class="settings-section-title">Files Downloaded</h2>
+        <p class="settings-section-desc">
+          Two files have been saved to your Downloads folder:
+        </p>
+        <div class="output-files">
+          <div class="output-file-item">
+            <span class="output-file-icon">🔒</span>
+            <div>
+              <div id="out-enc-name" class="output-file-name"></div>
+              <div class="output-file-desc">Encrypted file — safe to store anywhere</div>
+            </div>
+          </div>
+          <div class="output-file-item">
+            <span class="output-file-icon">📋</span>
+            <div>
+              <div id="out-meta-name" class="output-file-name"></div>
+              <div class="output-file-desc">Encryption metadata — keep this with the .enc file</div>
+            </div>
+          </div>
+        </div>
+        <p class="config-note" style="margin-top:1rem">
+          <strong>Important:</strong> Keep both files together.
+          You need both files <em>and</em> your password to decrypt.
+          Upload them anywhere — Google Drive, Dropbox, OneDrive, USB drive, or email them to yourself.
+        </p>
+        <a href="decrypt.html" class="btn btn-ghost" style="margin-top:1rem;display:inline-flex">
+          🔓 Go to Decrypt Local File →
+        </a>
+      </div>
+
+    </main>
+  </div>
+
+  <!-- Mobile nav -->
+  <nav class="mobile-nav" aria-label="Mobile navigation">
+    <a href="dashboard.html"><span class="mobile-nav-icon">⌂</span>Home</a>
+    <a href="upload.html"><span class="mobile-nav-icon">↑</span>Upload</a>
+    <a href="encrypt.html" class="active"><span class="mobile-nav-icon">🔒</span>Encrypt</a>
+    <a href="decrypt.html"><span class="mobile-nav-icon">🔓</span>Decrypt</a>
+    <a href="settings.html"><span class="mobile-nav-icon">⚙</span>Settings</a>
+  </nav>
+
+  <script type="module" src="../assets/js/encrypt-local.js"></script>
+</body>
+</html>

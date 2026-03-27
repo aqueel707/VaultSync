@@ -31,6 +31,8 @@
 
       <!-- Navigation cards -->
       <div class="nav-grid">
+
+        <!-- Existing cards -->
         <a href="upload.html" class="nav-card">
           <span class="nav-card-icon">↑</span>
           <span class="nav-card-title">Upload File</span>
@@ -46,7 +48,7 @@
         <a href="settings.html" class="nav-card">
           <span class="nav-card-icon">⚙</span>
           <span class="nav-card-title">Storage Settings</span>
-          <span class="nav-card-desc">Switch between app storage and your own Firebase bucket</span>
+          <span class="nav-card-desc">Switch between app storage and your own bucket</span>
         </a>
 
         <button id="btn-logout" class="nav-card">
@@ -54,30 +56,38 @@
           <span class="nav-card-title">Sign Out</span>
           <span class="nav-card-desc">End your current session</span>
         </button>
-      </div>
 
+        <!-- NEW cards -->
+        <a href="encrypt.html" class="nav-card">
+          <span class="nav-card-icon">🔒</span>
+          <span class="nav-card-title">Encrypt &amp; Export</span>
+          <span class="nav-card-desc">Encrypt a file and save it to your device — no cloud needed</span>
+        </a>
+
+        <a href="decrypt.html" class="nav-card">
+          <span class="nav-card-icon">🔓</span>
+          <span class="nav-card-title">Decrypt Local File</span>
+          <span class="nav-card-desc">Upload a local .enc file and decrypt it in your browser</span>
+        </a>
+
+      </div>
     </div>
   </div>
 
   <script type="module">
     import { requireAuth, navigateTo, markLoggedOut } from "../assets/js/router.js";
-    import { logoutUser }     from "../assets/js/auth.js";
+    import { logoutUser }      from "../assets/js/auth.js";
     import * as storageManager from "../assets/js/storage-manager.js";
 
-    // Guard — redirects to login if not authed
     const user = await requireAuth("login.html");
-
-    // Restore storage mode from localStorage
     await storageManager.initFromStorage();
 
-    // Populate UI
     document.getElementById("user-email").textContent = user.email;
     const badge = document.getElementById("storage-badge");
     const mode  = storageManager.getMode();
     badge.textContent = mode === "user" ? "Your Storage" : "App Storage";
     badge.className   = `storage-badge ${mode}`;
 
-    // Logout
     document.getElementById("btn-logout").addEventListener("click", async () => {
       await logoutUser();
       markLoggedOut();
