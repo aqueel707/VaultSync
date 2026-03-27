@@ -92,7 +92,11 @@ async function loadFileList() {
   try {
     fileList = await storageManager.listUserFiles(user.uid);
   } catch (err) {
-    fileListEl.innerHTML = `<p class="error-msg">${err.message}</p>`;
+    const errP = document.createElement("p");
+    errP.className   = "error-msg";
+    errP.textContent = err.message;   // textContent — never innerHTML with external data
+    fileListEl.innerHTML = "";
+    fileListEl.appendChild(errP);
     console.error("List error:", err);
     return;
   }
@@ -104,11 +108,16 @@ function renderFileList() {
   fileListEl.innerHTML = "";
 
   if (!fileList.length) {
-    fileListEl.innerHTML = `
-      <div class="empty-state">
-        <span class="empty-icon">☁</span>
-        <p>No files uploaded yet.</p>
-      </div>`;
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    const icon = document.createElement("span");
+    icon.className   = "empty-icon";
+    icon.textContent = "☁";
+    const msg = document.createElement("p");
+    msg.textContent  = "No files uploaded yet.";
+    empty.appendChild(icon);
+    empty.appendChild(msg);
+    fileListEl.appendChild(empty);
     return;
   }
 
@@ -121,14 +130,33 @@ function renderFileList() {
       year: "numeric", month: "short", day: "numeric",
     });
 
-    card.innerHTML = `
-      <span class="file-thumb">${fileEmoji(metadata.mimeType)}</span>
-      <div class="file-info">
-        <div class="file-card-name">${metadata.originalName}</div>
-        <div class="file-card-meta">${formatBytes(metadata.size)} · ${date}</div>
-      </div>
-      <span class="file-badge">ENC</span>
-    `;
+    // ── Safe DOM construction — no innerHTML with external data ──────────
+    const thumb = document.createElement("span");
+    thumb.className   = "file-thumb";
+    thumb.textContent = fileEmoji(metadata.mimeType);   // emoji only, safe
+
+    const info = document.createElement("div");
+    info.className = "file-info";
+
+    const nameEl = document.createElement("div");
+    nameEl.className   = "file-card-name";
+    nameEl.textContent = metadata.originalName;         // textContent, not innerHTML
+
+    const metaEl = document.createElement("div");
+    metaEl.className   = "file-card-meta";
+    metaEl.textContent = `${formatBytes(metadata.size)} · ${date}`;
+
+    info.appendChild(nameEl);
+    info.appendChild(metaEl);
+
+    const badge = document.createElement("span");
+    badge.className   = "file-badge";
+    badge.textContent = "ENC";
+
+    card.appendChild(thumb);
+    card.appendChild(info);
+    card.appendChild(badge);
+    // ────────────────────────────────────────────────────────────────────
 
     card.addEventListener("click", () => selectFile(storageKey, metadata));
     fileListEl.appendChild(card);

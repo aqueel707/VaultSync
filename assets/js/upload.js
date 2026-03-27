@@ -144,7 +144,17 @@ function renderSelectedFiles() {
   selectedFiles.forEach((f) => {
     const item = document.createElement("div");
     item.className = "selected-file-item";
-    item.innerHTML = `<span class="file-name">${f.name}</span><span>${formatBytes(f.size)}</span>`;
+
+    // Safe DOM — textContent only, no innerHTML with filename
+    const nameSpan = document.createElement("span");
+    nameSpan.className   = "file-name";
+    nameSpan.textContent = f.name;
+
+    const sizeSpan = document.createElement("span");
+    sizeSpan.textContent = formatBytes(f.size);
+
+    item.appendChild(nameSpan);
+    item.appendChild(sizeSpan);
     selectedFilesEl.appendChild(item);
   });
 }
