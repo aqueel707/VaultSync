@@ -1,178 +1,155 @@
-# ⬡ VaultSync — Client-Side Encrypted Cloud Storage
+# VaultSync — Encrypted Cloud Storage
 
-> **Zero-knowledge file storage.** Files are encrypted entirely in your browser
-> before they ever reach the cloud. The server never sees your plaintext data or
-> encryption keys — ever.
+A web app where your files are encrypted in the browser before they go anywhere.
+The server never sees your actual data — only the encrypted version of it.
 
-🔗 **Live Demo:** https://aqueel707.github.io/VaultSync/pages/login.html
-
----
-
-## What is VaultSync?
-
-VaultSync is a secure cloud file storage web application where **all encryption
-happens in the browser** before upload. Even the storage provider (Supabase) only
-ever holds encrypted ciphertext — it has no ability to read your files.
-
-Built as a fully static multi-page application (MPA), VaultSync requires **no
-backend server** and runs entirely on free-tier infrastructure.
+Live: https://aqueel707.github.io/VaultSync/pages/login.html
 
 ---
 
-## Security Model
+## What does it actually do?
 
-| Property | Detail |
-|---|---|
-| Encryption algorithm | AES-256-GCM |
-| Key derivation | PBKDF2-SHA-256, 150,000 iterations |
-| Key isolation | Raw DEK never stored or transmitted |
-| Server knowledge | Zero — only ciphertext is uploaded |
-| Authentication | Firebase Auth (email/password) |
-| Storage | Supabase Storage (private bucket + RLS) |
-| Hosting | GitHub Pages (no backend) |
+When you upload a file, VaultSync encrypts it on your device first using AES-256-GCM
+before anything is sent to the cloud. The encryption key is derived from your password
+using PBKDF2 (150,000 iterations) and never leaves your browser. Even if someone broke
+into the storage bucket, all they'd find is unreadable ciphertext.
 
-### Encryption Architecture
-```
-USER PASSWORD
-      │
-      ▼
-PBKDF2-SHA-256 (150,000 iterations + random 16-byte salt)
-      │
-      ▼
-WRAPPING KEY (AES-256, never stored)
-      │
-      ├─── wraps ──────────────────────────────┐
-      │                                         │
-      │    DEK (random 256-bit, never stored)  │
-      │     │                                   │
-      │     └── AES-256-GCM encrypt ───────┐   │
-      │              (random 12-byte IV)    │   │
-      │                                     ▼   ▼
-      │                              ┌─────────────────┐
-      │                              │  metadata.json  │
-      │                              │  salt (b64)     │
-      │                              │  fileIV (b64)   │
-      │                              │  dekIV (b64)    │
-      │                              │  wrappedDEK(b64)│
-      │                              │  originalName   │
-      │                              │  timestamp      │
-      │                              └─────────────────┘
-      ▼
-PLAINTEXT FILE
-      │
-      ▼
-AES-256-GCM encrypt (DEK + fileIV)
-      │
-      ▼
-CIPHERTEXT BLOB ──► Supabase Storage
-METADATA JSON   ──► Supabase Storage
-```
+There's no backend server. No database of passwords. Nothing to breach on the server side
+that would compromise your files.
 
 ---
 
 ## Features
 
-- 🔒 **Client-side AES-256-GCM encryption** — files encrypted before upload
-- 🔑 **PBKDF2 key derivation** — password never stored, never transmitted
-- 🗂 **Multi-page application** — dedicated pages for login, dashboard, upload, files, settings
-- ☁ **Hybrid storage** — use the app's Supabase bucket or connect your own
-- 🔐 **Firebase Authentication** — email/password login and registration
-- 📁 **File management** — list, decrypt, download, and delete encrypted files
-- 📱 **Responsive UI** — works on desktop and mobile
-- 🚀 **Zero backend** — fully static, deployed on GitHub Pages
-- 💾 **Persistent settings** — storage mode saved in `localStorage`
+**Cloud storage (with account)**
+- Upload encrypted files to the app's Supabase bucket
+- Or connect your own Supabase bucket in Settings — your data, your infrastructure
+- Browse, decrypt, and download your files from any device
+- Delete files from the bucket
+
+**Local encryption (no cloud needed)**
+- Encrypt any file and download it directly to your device as a `.enc` + `.meta.json` pair
+- Save those files anywhere — Google Drive, Dropbox, OneDrive, a USB drive, email to yourself
+- Come back later and decrypt any locally saved file right in the browser
+- Nothing is uploaded anywhere during this process
+
+**Authentication**
+- Email/password login via Firebase Auth
+- Protected pages redirect to login if you're not signed in
 
 ---
 
-## Project Structure
+## Security model
+
+Everything cryptographic happens in the browser using the native Web Crypto API —
+no third-party crypto libraries involved.
+```
+Your password
+    |
+    v
+PBKDF2-SHA-256 (150,000 iterations + random 16-byte salt)
+    |
+    v
+Wrapping Key  ──── wraps ────>  Random 256-bit DEK
+                                      |
+                                      v
+                              AES-256-GCM encrypt
+                                      |
+                                      v
+                               Encrypted file blob  ──> stored/downloaded
+                               + metadata JSON      ──> stored/downloaded
+                                 (salt, IVs, wrapped DEK, filename)
+```
+
+The raw DEK is never stored. Your password is never stored or transmitted.
+The metadata JSON on its own is useless without the password.
+
+---
+
+## Pages
+
+| Page | What it does |
+|---|---|
+| `login.html` | Sign in or create an account |
+| `dashboard.html` | Home screen with navigation |
+| `upload.html` | Encrypt and upload to cloud storage |
+| `files.html` | List your cloud files, decrypt and download |
+| `encrypt.html` | Encrypt a file and download it locally — no cloud |
+| `decrypt.html` | Upload a local .enc file and decrypt it |
+| `settings.html` | Switch between app storage and your own Supabase bucket |
+
+---
+
+## Project structure
 ```
 VaultSync/
 ├── pages/
-│   ├── index.html        ← Entry point — auth check & redirect
-│   ├── login.html        ← Register / Sign in
-│   ├── dashboard.html    ← Navigation hub
-│   ├── upload.html       ← Encrypt & upload files
-│   ├── files.html        ← List, decrypt & download files
-│   └── settings.html     ← Storage mode configuration
+│   ├── index.html
+│   ├── login.html
+│   ├── dashboard.html
+│   ├── upload.html
+│   ├── files.html
+│   ├── encrypt.html
+│   ├── decrypt.html
+│   └── settings.html
 │
 ├── assets/
 │   ├── css/
-│   │   └── style.css     ← Shared stylesheet
+│   │   └── style.css
 │   └── js/
-│       ├── firebase-config.js   ← ⚠ Firebase credentials
-│       ├── auth.js              ← Firebase Authentication
-│       ├── router.js            ← Page guards
-│       ├── crypto-utils.js      ← PBKDF2 + AES-256-GCM (unchanged)
-│       ├── supabase-client.js   ← Supabase client setup
-│       ├── firebase-managed.js  ← App-owned storage provider
-│       ├── firebase-user.js     ← User-owned storage provider
-│       ├── storage-manager.js   ← Provider abstraction + localStorage
-│       ├── upload.js            ← Upload page controller
-│       └── download.js          ← Files page controller
+│       ├── firebase-config.js    <- put your Firebase credentials here
+│       ├── supabase-client.js    <- Supabase client setup
+│       ├── auth.js               <- login / register / logout
+│       ├── router.js             <- page guards
+│       ├── crypto-utils.js       <- all the crypto logic (don't touch this)
+│       ├── firebase-managed.js   <- app Supabase storage provider
+│       ├── firebase-user.js      <- user-owned Supabase storage provider
+│       ├── storage-manager.js    <- picks which provider to use
+│       ├── upload.js             <- upload page logic
+│       ├── download.js           <- files page logic
+│       ├── encrypt-local.js      <- local encrypt page logic
+│       └── decrypt-local.js      <- local decrypt page logic
 │
 ├── firebase/
 │   └── storage.rules
-├── .gitignore
 └── README.md
 ```
 
 ---
 
-## How Routing Works
+## Setup
 
-Every protected page calls `requireAuth()` from `router.js`. This waits for
-Firebase to resolve the auth state, then either returns the user or redirects to
-`login.html`. Pages `await` this before rendering, preventing any flash of
-wrong UI.
-```
-Open app
-    │
-    ▼
-pages/index.html
-    ├── authed? ──YES──► dashboard.html
-    └── no ────────────► login.html
-                              │
-                      login or register
-                              │
-                              ▼
-                        dashboard.html
-                        ┌────┬───────┬──────────┐
-                        ↓    ↓       ↓          ↓
-                     upload files  settings  logout
-```
-
----
-
-## Setup Instructions
-
-### 1. Clone the repository
+### 1. Clone it
 ```bash
 git clone https://github.com/aqueel707/VaultSync.git
 cd VaultSync
 ```
 
-### 2. Insert your Firebase config
+### 2. Add your Firebase config
 
-Edit `assets/js/firebase-config.js`:
+Edit `assets/js/firebase-config.js` and paste in your Firebase project credentials.
+You get these from Firebase Console > Project Settings > Your apps > SDK setup.
 ```js
 export const firebaseConfig = {
-  apiKey:            "YOUR_API_KEY",
-  authDomain:        "YOUR_PROJECT_ID.firebaseapp.com",
-  projectId:         "YOUR_PROJECT_ID",
-  storageBucket:     "YOUR_PROJECT_ID.appspot.com",
-  messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
-  appId:             "YOUR_APP_ID",
+  apiKey:            "...",
+  authDomain:        "...",
+  projectId:         "...",
+  storageBucket:     "...",
+  messagingSenderId: "...",
+  appId:             "...",
 };
 ```
 
+These keys are public by design — Firebase security comes from Auth rules,
+not from keeping the config secret.
+
 ### 3. Firebase setup
 
-- **Authentication** → Sign-in method → Enable **Email/Password**
+- Authentication > Sign-in method > enable Email/Password
 
 ### 4. Supabase setup
 
-- Create a **private** bucket named `vaultsync`
-- Run these RLS policies in the **SQL Editor**:
+Create a private bucket called `vaultsync`, then run these in the SQL editor:
 ```sql
 CREATE POLICY "Anon can upload to vaultsync"
 ON storage.objects FOR INSERT TO anon, authenticated
@@ -193,40 +170,45 @@ USING (bucket_id = 'vaultsync');
 
 ---
 
-## Running Locally
+## Running locally
 
-ES modules require HTTP — you cannot open files directly as `file://` URLs.
+You need an HTTP server — ES modules don't work over `file://`.
 ```bash
-# Option A — npx serve (recommended)
+# easiest option
 npx serve .
-# Open http://localhost:3000/pages/
 
-# Option B — Python
-python3 -m http.server 8080
-# Open http://localhost:8080/pages/
+# then open
+http://localhost:3000/pages/
 ```
 
 ---
 
-## Deploying to GitHub Pages
+## Deploying
 
-1. Push to GitHub
-2. Go to **Settings → Pages** → Source: branch `main`, folder `/`
-3. Site goes live at `https://<username>.github.io/<repo-name>/pages/`
-4. Add that URL to Firebase Auth → **Authorised domains**
+Push to GitHub, then go to Settings > Pages > Source: branch `main`, folder `/`.
+
+Add your GitHub Pages URL to Firebase Auth > Authorised domains so login works.
 
 ---
 
-## Tech Stack
+## File size limits
 
-| Layer | Technology |
-|---|---|
-| Encryption | Web Crypto API (AES-256-GCM, PBKDF2) |
-| Authentication | Firebase Authentication |
-| Storage | Supabase Storage |
-| Frontend | HTML5, CSS3, Vanilla JS (ES Modules) |
-| Hosting | GitHub Pages |
-| Build tools | None — zero build step |
+**Cloud upload** — capped at 50MB in the UI (Supabase free tier friendly).
+
+**Local encrypt/export** — no hard limit. The file is loaded into browser memory,
+so practically speaking anything under ~500MB works fine on a normal laptop.
+Very large files (1GB+) depend on how much RAM the device has.
+
+---
+
+## Tech stack
+
+- Encryption: Web Crypto API (AES-256-GCM, PBKDF2-SHA-256)
+- Auth: Firebase Authentication
+- Cloud storage: Supabase Storage
+- Frontend: Vanilla JS with ES modules, HTML, CSS
+- Hosting: GitHub Pages
+- Build tools: none
 
 ---
 
