@@ -27,6 +27,7 @@
 
 import { supabase, BUCKET } from "./supabase-client.js";
 import { createVault, unlockVault, unlockVaultWithRecovery, recoverWithKeyAndReset } from "./crypto-utils.js";
+import { publishPublicKey } from "./directory.js";
 
 // ─── IndexedDB: store one non-extractable CryptoKey across pages ────────────
 
@@ -102,6 +103,17 @@ export async function hasVault(uid) {
   return (await fetchKeyvault(uid)) !== null;
 }
 
+// Publish this user's public key to the directory. Non-fatal — sharing is
+// optional and must never block sign-in.
+async function publishDir(uid, email, keyvault) {
+  try {
+    const pk = keyvault?.sharing?.publicKey;
+    if (pk && email) await publishPublicKey(uid, email, pk);
+  } catch (e) {
+    console.warn("Public-key directory publish failed:", e?.message);
+  }
+}
+
 // ─── Session API ────────────────────────────────────────────────────────────
 
 export async function getMasterKey() {
@@ -121,27 +133,30 @@ export async function lock() {
  * Used at registration, and to migrate pre-vault accounts on first login.
  * @returns {{ recoveryKey: string | null }}
  */
-export async function provisionVault(uid, password, { withRecovery = true } = {}) {
+export async function provisionVault(uid, email, password, { withRecovery = true } = {}) {
   const { keyvault, recoveryKey, masterKey } = await createVault(password, { withRecovery });
   await storeKeyvault(uid, keyvault);
   await idbPut(MK_ID, masterKey);
+  await publishDir(uid, email, keyvault);
   return { recoveryKey };
 }
 
 /** Fetch + unlock the vault with the password, then persist the master key. */
-export async function openVault(uid, password) {
+export async function openVault(uid, email, password) {
   const keyvault = await fetchKeyvault(uid);
   if (!keyvault) throw new Error("NO_VAULT");
   const { masterKey } = await unlockVault(keyvault, password);  // throws "Incorrect password." on mismatch
   await idbPut(MK_ID, masterKey);
+  await publishDir(uid, email, keyvault);
 }
 
 /** Fetch + unlock the vault with the recovery key, then persist the master key. */
-export async function openVaultWithRecovery(uid, recoveryKey) {
+export async function openVaultWithRecovery(uid, email, recoveryKey) {
   const keyvault = await fetchKeyvault(uid);
   if (!keyvault) throw new Error("NO_VAULT");
   const { masterKey } = await unlockVaultWithRecovery(keyvault, recoveryKey);
   await idbPut(MK_ID, masterKey);
+  await publishDir(uid, email, keyvault);
 }
 
 /**
@@ -149,10 +164,11 @@ export async function openVaultWithRecovery(uid, recoveryKey) {
  * the master key under `newPassword`, save the updated keyvault, and persist the
  * session key. After this, normal password login works again.
  */
-export async function recoverAccount(uid, recoveryKey, newPassword) {
+export async function recoverAccount(uid, email, recoveryKey, newPassword) {
   const keyvault = await fetchKeyvault(uid);
   if (!keyvault) throw new Error("NO_VAULT");
   const { keyvault: updated, masterKey } = await recoverWithKeyAndReset(keyvault, recoveryKey, newPassword);
   await storeKeyvault(uid, updated);
   await idbPut(MK_ID, masterKey);
+  await publishDir(uid, email, updated);
 }

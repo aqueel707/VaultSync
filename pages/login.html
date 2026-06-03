@@ -173,7 +173,7 @@
     const recoveryPanel       = $("recovery-panel");
     const recoveryUnlockPanel = $("recovery-unlock-panel");
 
-    let pendingUid = null, pendingPassword = null;
+    let pendingUid = null, pendingPassword = null, pendingEmail = null;
 
     // ── Tab switching ─────────────────────────────────────────────────────
     const tabs = document.querySelectorAll(".tab");
@@ -284,7 +284,7 @@
       recErr.hidden = true;
       setLoading(btnRecoveryUnlock, true);
       try {
-        await vault.recoverAccount(pendingUid, key, pendingPassword);
+        await vault.recoverAccount(pendingUid, pendingEmail, key, pendingPassword);
         navigateTo("dashboard.html");
       } catch (err) {
         recErr.textContent = err.message || "Recovery failed.";
@@ -299,22 +299,24 @@
       showError("");
       setLoading(btnLogin, true);
       try {
-        const cred = await loginUser($("login-email").value.trim(), $("login-pass").value);
-        const uid  = cred.user.uid;
-        const pass = $("login-pass").value;
+        const cred  = await loginUser($("login-email").value.trim(), $("login-pass").value);
+        const uid   = cred.user.uid;
+        const email = cred.user.email;
+        const pass  = $("login-pass").value;
 
         try {
-          await vault.openVault(uid, pass);
+          await vault.openVault(uid, email, pass);
           navigateTo("dashboard.html");
         } catch (vErr) {
           if (vErr.message === "NO_VAULT") {
             // Pre-vault account → provision one now (one-time migration).
-            const { recoveryKey } = await vault.provisionVault(uid, pass, { withRecovery: true });
+            const { recoveryKey } = await vault.provisionVault(uid, email, pass, { withRecovery: true });
             showRecoveryPanel(recoveryKey);
           } else {
             // Auth OK but vault won't unlock — e.g. the Firebase password was reset
             // without re-wrapping the vault. Offer recovery-key unlock.
             pendingUid      = uid;
+            pendingEmail    = email;
             pendingPassword = pass;
             setLoading(btnLogin, false);
             showRecoveryUnlockPanel();
@@ -333,11 +335,12 @@
       setLoading(btnRegister, true);
       try {
         const withRecovery = $("reg-recovery").checked;
-        const cred = await registerUser($("reg-email").value.trim(), $("reg-pass").value);
-        const uid  = cred.user.uid;
-        const pass = $("reg-pass").value;
+        const cred  = await registerUser($("reg-email").value.trim(), $("reg-pass").value);
+        const uid   = cred.user.uid;
+        const email = cred.user.email;
+        const pass  = $("reg-pass").value;
 
-        const { recoveryKey } = await vault.provisionVault(uid, pass, { withRecovery });
+        const { recoveryKey } = await vault.provisionVault(uid, email, pass, { withRecovery });
 
         if (recoveryKey) showRecoveryPanel(recoveryKey);
         else navigateTo("dashboard.html");   // opted out — already warned via the checkbox
