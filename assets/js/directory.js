@@ -28,11 +28,12 @@ export async function publishPublicKey(uid, email, publicKey) {
 }
 
 /**
- * Resolve a recipient's public key by exact email.
- * @returns {Promise<string|null>} base64 raw X25519 public key, or null if unknown
+ * Resolve a recipient by exact email.
+ * @returns {Promise<{uid: string, publicKey: string}|null>} or null if unknown
  */
-export async function lookupPublicKey(email) {
+export async function lookupRecipient(email) {
   const { data, error } = await supabase.rpc("get_public_key", { p_email: email });
   if (error) throw new Error(`Directory lookup failed: ${error.message}`);
-  return data ?? null;
+  if (!data) return null;
+  return { uid: data.uid, publicKey: data.public_key };
 }

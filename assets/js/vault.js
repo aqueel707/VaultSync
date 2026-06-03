@@ -103,6 +103,12 @@ export async function hasVault(uid) {
   return (await fetchKeyvault(uid)) !== null;
 }
 
+/** This user's own X25519 public key (for showing their fingerprint), or null. */
+export async function getPublicKey(uid) {
+  const kv = await fetchKeyvault(uid);
+  return kv?.sharing?.publicKey ?? null;
+}
+
 // Publish this user's public key to the directory. Non-fatal — sharing is
 // optional and must never block sign-in.
 async function publishDir(uid, email, keyvault) {

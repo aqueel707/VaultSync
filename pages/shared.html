@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="
+  default-src 'self';
+  script-src  'self' 'unsafe-inline' https://www.gstatic.com https://cdn.jsdelivr.net;
+  style-src   'self' 'unsafe-inline' https://fonts.googleapis.com;
+  font-src    'self' https://fonts.gstatic.com;
+  connect-src 'self'
+              https://isvaqkhbdzlgjylkvvvl.supabase.co
+              https://firestore.googleapis.com
+              https://identitytoolkit.googleapis.com
+              https://securetoken.googleapis.com
+              https://www.googleapis.com
+              https://cdn.jsdelivr.net;
+  img-src     'self' data: blob:;
+  object-src  'none';
+  base-uri    'self';
+  frame-ancestors 'none';
+">
+  <title>VaultSync — Shared with me</title>
+  <link rel="stylesheet" href="../assets/css/style.css" />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <div class="bg-grid" aria-hidden="true"></div>
+
+  <div class="page-app">
+
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <span class="brand-icon">⬡</span>
+        <span class="brand-name">VaultSync</span>
+      </div>
+      <nav class="sidebar-nav">
+        <a href="dashboard.html" class="nav-item"><span class="nav-icon">⌂</span> Dashboard</a>
+        <a href="upload.html"    class="nav-item"><span class="nav-icon">↑</span> Upload</a>
+        <a href="files.html"     class="nav-item"><span class="nav-icon">▤</span> My Files</a>
+        <a href="shared.html"    class="nav-item active"><span class="nav-icon">⇄</span> Shared with me</a>
+        <a href="settings.html"  class="nav-item"><span class="nav-icon">⚙</span> Settings</a>
+      </nav>
+      <div class="sidebar-footer">
+        <span id="storage-badge" class="storage-badge managed">App Storage</span>
+        <p id="user-email" class="user-email"></p>
+        <button id="btn-logout" class="btn btn-ghost btn-sm">Sign out</button>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <main class="main-content">
+      <header class="view-header">
+        <div>
+          <h1>Shared with me</h1>
+          <p class="view-subtitle">Files other people have shared with you, decrypted in your browser.</p>
+        </div>
+        <button id="btn-refresh" class="btn btn-ghost btn-sm">↺ Refresh</button>
+      </header>
+
+      <!-- Your fingerprint (for senders to verify) -->
+      <div class="panel" style="margin-bottom:1.25rem">
+        <p class="settings-section-desc" style="margin:0">
+          Your key fingerprint:
+          <code id="my-fingerprint" style="color:var(--accent)">…</code><br />
+          When someone shares with you, give them this so they can confirm they're
+          encrypting to the right person.
+        </p>
+      </div>
+
+      <!-- Incoming shares -->
+      <div id="share-list" class="file-list">
+        <p class="loading-msg">Loading…</p>
+      </div>
+
+      <!-- Receive / download panel -->
+      <div id="recv-panel" class="download-panel" hidden>
+        <div class="panel-header">
+          <span id="recv-from" class="dl-filename"></span>
+          <button id="btn-recv-close" class="icon-btn" aria-label="Close">✕</button>
+        </div>
+        <p class="settings-section-desc" style="margin-bottom:1rem">
+          This file is decrypted in your browser using the key the sender wrapped to you.
+        </p>
+        <div class="panel-actions">
+          <button id="btn-recv-download" class="btn btn-primary">
+            <span class="btn-label">🔓 Decrypt &amp; Download</span>
+            <span class="btn-spinner" hidden>⟳</span>
+          </button>
+          <button id="btn-recv-remove" class="btn btn-danger">✕ Remove</button>
+        </div>
+        <p id="recv-error" class="error-msg" hidden></p>
+      </div>
+
+    </main>
+  </div>
+
+  <script type="module" src="../assets/js/shared.js"></script>
+
+  <!-- Mobile bottom navigation -->
+  <nav class="mobile-nav" aria-label="Mobile navigation">
+    <a href="dashboard.html"><span class="mobile-nav-icon">⌂</span>Home</a>
+    <a href="upload.html"><span class="mobile-nav-icon">↑</span>Upload</a>
+    <a href="files.html"><span class="mobile-nav-icon">▤</span>Files</a>
+    <a href="shared.html" class="active"><span class="mobile-nav-icon">⇄</span>Shared</a>
+    <a href="settings.html"><span class="mobile-nav-icon">⚙</span>Settings</a>
+  </nav>
+</body>
+</html>

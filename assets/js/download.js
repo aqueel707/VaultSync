@@ -1,15 +1,20 @@
 /**
- * download.js
- * ───────────
+ * download.js  (key-mode / v2, with v1 fallback)
+ * ──────────────────────────────────────────────
  * Page controller for files.html.
- * Lists encrypted files, handles file selection, decryption, and download.
- * Delegates all crypto to crypto-utils.js and all storage to storage-manager.js.
+ *   • Lists files and decrypts each metadata client-side to show name/size/date.
+ *   • v2 (key-mode) files decrypt under the vault master key — no password.
+ *   • Legacy v1 files still require their per-file password (field shown only then).
+ * Crypto → crypto-utils.js, storage → storage-manager.js, master key → vault.js.
  */
 
 import { requireAuth, navigateTo, markLoggedOut } from "./router.js";
-import { logoutUser }               from "./auth.js";
-import { decryptFileWithPassword }  from "./crypto-utils.js";
-import * as storageManager          from "./storage-manager.js";
+import { logoutUser }       from "./auth.js";
+import { openFileWithKey, openFileWithPassword, openMetadataWithKey, publicKeyFingerprint } from "./crypto-utils.js";
+import * as storageManager  from "./storage-manager.js";
+import * as vault           from "./vault.js";
+import * as sharing         from "./sharing.js";
+import { lookupRecipient }  from "./directory.js";
 
 // ─── Boot ─────────────────────────────────────────────────────────────────
 
@@ -20,28 +25,41 @@ await storageManager.initFromStorage();
 
 const $ = (id) => document.getElementById(id);
 
-const fileListEl    = $("file-list");
-const btnRefresh    = $("btn-refresh");
-const downloadPanel = $("download-panel");
-const dlFilename    = $("dl-filename");
-const btnClosePanel = $("btn-close-panel");
-const decPassword   = $("dec-password");
-const togglePassBtn = $("toggle-dec-pass");
-const btnDownload   = $("btn-download");
-const btnDelete     = $("btn-delete");
-const dlError       = $("dl-error");
+const fileListEl     = $("file-list");
+const btnRefresh     = $("btn-refresh");
+const downloadPanel  = $("download-panel");
+const dlFilename     = $("dl-filename");
+const btnClosePanel  = $("btn-close-panel");
+const decPassword    = $("dec-password");
+const togglePassBtn  = $("toggle-dec-pass");
+const btnDownload    = $("btn-download");
+const btnDelete      = $("btn-delete");
+const dlError        = $("dl-error");
 const storageBadgeEl = $("storage-badge");
-const btnLogout     = $("btn-logout");
+const btnLogout      = $("btn-logout");
+
+const decPasswordField = decPassword.closest(".field");  // toggled per file type
+
+// Share UI
+const btnShare         = $("btn-share");
+const shareBox         = $("share-box");
+const shareEmail       = $("share-email");
+const btnShareLookup   = $("btn-share-lookup");
+const shareVerify      = $("share-verify");
+const shareFingerprint = $("share-fingerprint");
+const btnShareConfirm  = $("btn-share-confirm");
+const shareStatus      = $("share-status");
 
 // ─── State ────────────────────────────────────────────────────────────────
 
-let fileList        = [];
-let selectedFileKey = null;
+let entries          = [];     // [{ storageKey, metadata, displayMeta, locked }]
+let selected         = null;
+let pendingRecipient = null;   // { uid, publicKey, email } after a directory lookup
 
 // ─── Init ─────────────────────────────────────────────────────────────────
 
 renderStorageBadge();
-document.getElementById("user-email").textContent = user.email;
+$("user-email").textContent = user.email;
 loadFileList();
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -80,6 +98,10 @@ function renderStorageBadge() {
   storageBadgeEl.className   = `storage-badge ${mode}`;
 }
 
+function lockedMeta() {
+  return { originalName: "🔒 Locked — sign in again", mimeType: "", size: 0, timestamp: 0 };
+}
+
 // ─── File list ────────────────────────────────────────────────────────────
 
 btnRefresh?.addEventListener("click", loadFileList);
@@ -87,27 +109,57 @@ btnRefresh?.addEventListener("click", loadFileList);
 async function loadFileList() {
   fileListEl.innerHTML = `<p class="loading-msg">Loading…</p>`;
   downloadPanel.hidden = true;
-  selectedFileKey      = null;
+  selected             = null;
 
+  let raw;
   try {
-    fileList = await storageManager.listUserFiles(user.uid);
+    raw = await storageManager.listUserFiles(user.uid);
   } catch (err) {
-    const errP = document.createElement("p");
-    errP.className   = "error-msg";
-    errP.textContent = err.message;   // textContent — never innerHTML with external data
+    const p = document.createElement("p");
+    p.className   = "error-msg";
+    p.textContent = err.message;          // textContent — never innerHTML with external data
     fileListEl.innerHTML = "";
-    fileListEl.appendChild(errP);
+    fileListEl.appendChild(p);
     console.error("List error:", err);
     return;
   }
 
-  renderFileList();
+  const masterKey = await vault.getMasterKey();
+
+  entries = await Promise.all(raw.map(async ({ storageKey, metadata }) => {
+    if (metadata && metadata.mode === "key") {
+      // v2: metadata is encrypted — decrypt it with the master key.
+      if (!masterKey) return { storageKey, metadata, displayMeta: lockedMeta(), locked: true };
+      try {
+        const dm = await openMetadataWithKey(metadata, masterKey, storageKey);
+        return { storageKey, metadata, displayMeta: dm, locked: false };
+      } catch (e) {
+        console.warn("Metadata decrypt failed for", storageKey, e);
+        return { storageKey, metadata, displayMeta: lockedMeta(), locked: true };
+      }
+    }
+    // legacy v1: metadata is plaintext (originalName/size/timestamp present).
+    return { storageKey, metadata, displayMeta: metadata, locked: false };
+  }));
+
+  entries.sort((a, b) =>
+    new Date(b.displayMeta?.timestamp || 0) - new Date(a.displayMeta?.timestamp || 0));
+
+  const anyLocked = entries.some((e) => e.locked);
+  renderFileList(anyLocked);
 }
 
-function renderFileList() {
+function renderFileList(showLockBanner) {
   fileListEl.innerHTML = "";
 
-  if (!fileList.length) {
+  if (showLockBanner) {
+    const banner = document.createElement("p");
+    banner.className   = "error-msg";
+    banner.textContent = "Your vault is locked, so some files can't be shown. Sign out and sign in again.";
+    fileListEl.appendChild(banner);
+  }
+
+  if (!entries.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
     const icon = document.createElement("span");
@@ -121,56 +173,68 @@ function renderFileList() {
     return;
   }
 
-  fileList.forEach(({ storageKey, metadata }) => {
+  entries.forEach((entry) => {
+    const { storageKey, displayMeta, locked, metadata } = entry;
+
     const card = document.createElement("div");
     card.className   = "file-card";
     card.dataset.key = storageKey;
+    if (locked) card.style.opacity = "0.5";
 
-    const date = new Date(metadata.timestamp).toLocaleDateString(undefined, {
-      year: "numeric", month: "short", day: "numeric",
-    });
+    const date = displayMeta?.timestamp
+      ? new Date(displayMeta.timestamp).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })
+      : "";
 
-    // ── Safe DOM construction — no innerHTML with external data ──────────
     const thumb = document.createElement("span");
     thumb.className   = "file-thumb";
-    thumb.textContent = fileEmoji(metadata.mimeType);   // emoji only, safe
+    thumb.textContent = fileEmoji(displayMeta?.mimeType);
 
     const info = document.createElement("div");
     info.className = "file-info";
 
     const nameEl = document.createElement("div");
     nameEl.className   = "file-card-name";
-    nameEl.textContent = metadata.originalName;         // textContent, not innerHTML
+    nameEl.textContent = displayMeta?.originalName ?? "(unknown)";
 
     const metaEl = document.createElement("div");
     metaEl.className   = "file-card-meta";
-    metaEl.textContent = `${formatBytes(metadata.size)} · ${date}`;
+    metaEl.textContent = locked
+      ? "encrypted"
+      : `${formatBytes(displayMeta.size || 0)}${date ? " · " + date : ""}`;
 
     info.appendChild(nameEl);
     info.appendChild(metaEl);
 
     const badge = document.createElement("span");
     badge.className   = "file-badge";
-    badge.textContent = "ENC";
+    badge.textContent = metadata?.mode === "key" ? "ENC" : "ENC·V1";
 
     card.appendChild(thumb);
     card.appendChild(info);
     card.appendChild(badge);
-    // ────────────────────────────────────────────────────────────────────
 
-    card.addEventListener("click", () => selectFile(storageKey, metadata));
+    if (!locked) card.addEventListener("click", () => selectFile(entry));
     fileListEl.appendChild(card);
   });
 }
 
-function selectFile(storageKey, metadata) {
+function selectFile(entry) {
+  selected = entry;
   document.querySelectorAll(".file-card").forEach((c) => {
-    c.classList.toggle("selected", c.dataset.key === storageKey);
+    c.classList.toggle("selected", c.dataset.key === entry.storageKey);
   });
-  selectedFileKey        = storageKey;
-  dlFilename.textContent = metadata.originalName;
+  dlFilename.textContent = entry.displayMeta?.originalName ?? "";
   showError(dlError, "");
-  decPassword.value    = "";
+  decPassword.value = "";
+
+  // Only legacy v1 files need a per-file password; v2 use the vault key.
+  const isV1 = entry.metadata?.mode !== "key";
+  if (decPasswordField) decPasswordField.hidden = !isV1;
+
+  // Sharing is only available for key-mode (v2) files.
+  if (btnShare) btnShare.hidden = isV1;
+  resetShareBox();
+
   downloadPanel.hidden = false;
 }
 
@@ -180,12 +244,13 @@ togglePassBtn?.addEventListener("click", () => {
   decPassword.type = decPassword.type === "password" ? "text" : "password";
 });
 
-// ─── Close panel ─────────────────────────────────────────────────────────
+// ─── Close panel ──────────────────────────────────────────────────────────
 
 btnClosePanel?.addEventListener("click", () => {
   downloadPanel.hidden = true;
   document.querySelectorAll(".file-card").forEach((c) => c.classList.remove("selected"));
-  selectedFileKey = null;
+  selected = null;
+  resetShareBox();
 });
 
 // ─── Download / decrypt ───────────────────────────────────────────────────
@@ -193,31 +258,36 @@ btnClosePanel?.addEventListener("click", () => {
 btnDownload.addEventListener("click", handleDownload);
 
 async function handleDownload() {
-  if (!selectedFileKey) return;
-  const password = decPassword.value;
-  if (!password) return showError(dlError, "Please enter the decryption password.");
+  if (!selected) return;
+
+  const isV1 = selected.metadata?.mode !== "key";
+  if (isV1 && !decPassword.value) return showError(dlError, "Please enter the decryption password.");
 
   showError(dlError, "");
   setLoading(btnDownload, true);
 
   try {
     const { ciphertext, metadata } = await storageManager.downloadEncryptedFile(
-      user.uid, selectedFileKey,
+      user.uid, selected.storageKey,
     );
 
-    const { plaintext, name, mimeType } = await decryptFileWithPassword(
-      ciphertext, metadata, password,
-    );
+    let result;
+    if (metadata.mode === "key") {
+      const masterKey = await vault.getMasterKey();
+      if (!masterKey) throw new Error("Your vault is locked. Sign out and sign in again.");
+      result = await openFileWithKey(ciphertext, metadata, masterKey, selected.storageKey);
+    } else {
+      result = await openFileWithPassword(ciphertext, metadata, decPassword.value);
+    }
 
-    const blob = new Blob([plaintext], { type: mimeType });
+    const blob = new Blob([result.plaintext], { type: result.mimeType });
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement("a");
     a.href     = url;
-    a.download = name;
+    a.download = result.name;
     a.click();
     URL.revokeObjectURL(url);
 
-    showError(dlError, "");
     decPassword.value = "";
   } catch (err) {
     console.error("Decrypt error:", err);
@@ -230,17 +300,89 @@ async function handleDownload() {
 // ─── Delete ───────────────────────────────────────────────────────────────
 
 btnDelete?.addEventListener("click", async () => {
-  if (!selectedFileKey) return;
+  if (!selected) return;
   if (!confirm("Permanently delete this file? This cannot be undone.")) return;
 
   try {
-    await storageManager.deleteFile(user.uid, selectedFileKey);
+    await storageManager.deleteFile(user.uid, selected.storageKey);
     downloadPanel.hidden = true;
-    selectedFileKey      = null;
+    selected             = null;
     await loadFileList();
   } catch (err) {
     console.error("Delete error:", err);
     showError(dlError, "Failed to delete file.");
+  }
+});
+
+// ─── Share ────────────────────────────────────────────────────────────────
+
+function resetShareBox() {
+  if (!shareBox) return;
+  shareBox.hidden    = true;
+  shareVerify.hidden = true;
+  shareStatus.hidden = true;
+  shareEmail.value   = "";
+  pendingRecipient   = null;
+}
+
+function showShareStatus(msg, type) {
+  shareStatus.textContent = msg;
+  shareStatus.className    = `config-status ${type}`;
+  shareStatus.hidden       = !msg;
+}
+
+btnShare?.addEventListener("click", () => {
+  if (shareBox.hidden) shareBox.hidden = false;
+  else resetShareBox();
+});
+
+btnShareLookup?.addEventListener("click", async () => {
+  const email = shareEmail.value.trim().toLowerCase();
+  shareVerify.hidden = true;
+  pendingRecipient   = null;
+  if (!email) return showShareStatus("Enter a recipient email.", "error");
+  if (email === (user.email || "").toLowerCase()) {
+    return showShareStatus("You can't share a file with yourself.", "error");
+  }
+
+  showShareStatus("Looking up recipient…", "info");
+  try {
+    const rec = await lookupRecipient(email);
+    if (!rec || !rec.publicKey) {
+      return showShareStatus("No VaultSync user with that email (they need an account with sharing enabled).", "error");
+    }
+    pendingRecipient = { ...rec, email };
+    shareFingerprint.textContent = await publicKeyFingerprint(rec.publicKey);
+    shareVerify.hidden = false;
+    showShareStatus("", "");
+  } catch (err) {
+    showShareStatus(err.message || "Lookup failed.", "error");
+  }
+});
+
+btnShareConfirm?.addEventListener("click", async () => {
+  if (!selected || !pendingRecipient) return;
+  const masterKey = await vault.getMasterKey();
+  if (!masterKey) return showShareStatus("Your vault is locked. Sign out and sign in again.", "error");
+
+  btnShareConfirm.disabled = true;
+  showShareStatus("Sharing…", "info");
+  try {
+    await sharing.createShare({
+      ownerUid:           user.uid,
+      ownerEmail:         user.email,
+      storageKey:         selected.storageKey,
+      fileMetadata:       selected.metadata,
+      masterKey,
+      recipientUid:       pendingRecipient.uid,
+      recipientPublicKey: pendingRecipient.publicKey,
+    });
+    showShareStatus(`Shared with ${pendingRecipient.email}. ⇄`, "success");
+    shareVerify.hidden = true;
+  } catch (err) {
+    showShareStatus(err.message || "Sharing failed.", "error");
+  } finally {
+    btnShareConfirm.disabled = false;
   }
 });
 

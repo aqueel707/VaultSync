@@ -40,6 +40,7 @@
         <a href="dashboard.html" class="nav-item"><span class="nav-icon">⌂</span> Dashboard</a>
         <a href="upload.html"    class="nav-item"><span class="nav-icon">↑</span> Upload</a>
         <a href="files.html"     class="nav-item active"><span class="nav-icon">▤</span> My Files</a>
+        <a href="shared.html"    class="nav-item"><span class="nav-icon">⇄</span> Shared with me</a>
         <a href="settings.html"  class="nav-item"><span class="nav-icon">⚙</span> Settings</a>
       </nav>
       <div class="sidebar-footer">
@@ -86,10 +87,35 @@
             <span class="btn-label">🔓 Decrypt &amp; Download</span>
             <span class="btn-spinner" hidden>⟳</span>
           </button>
+          <button id="btn-share" class="btn btn-ghost" hidden>⇄ Share</button>
           <button id="btn-delete" class="btn btn-danger">✕ Delete</button>
         </div>
 
         <p id="dl-error" class="error-msg" hidden></p>
+
+        <!-- Share sub-panel (key-mode files only) -->
+        <div id="share-box" hidden style="margin-top:1rem;border-top:1px solid var(--border);padding-top:1rem">
+          <div class="field" style="margin-bottom:0.6rem">
+            <label for="share-email">Share with (email)</label>
+            <input type="email" id="share-email" placeholder="recipient@example.com"
+                   autocomplete="off" spellcheck="false" />
+          </div>
+          <button id="btn-share-lookup" class="btn btn-ghost btn-sm">Look up recipient</button>
+
+          <div id="share-verify" hidden style="margin-top:0.85rem">
+            <p class="config-note" style="margin:0">
+              Recipient key fingerprint:
+              <code id="share-fingerprint" style="color:var(--accent)"></code><br />
+              Ask them to confirm this matches the fingerprint shown on their
+              <strong>Shared with me</strong> page before you share.
+            </p>
+            <button id="btn-share-confirm" class="btn btn-primary btn-sm" style="margin-top:0.65rem">
+              Share this file
+            </button>
+          </div>
+
+          <p id="share-status" class="config-status" hidden></p>
+        </div>
       </div>
 
     </main>
@@ -102,6 +128,7 @@
     <a href="dashboard.html"><span class="mobile-nav-icon">⌂</span>Home</a>
     <a href="upload.html"><span class="mobile-nav-icon">↑</span>Upload</a>
     <a href="files.html" class="active"><span class="mobile-nav-icon">▤</span>Files</a>
+    <a href="shared.html"><span class="mobile-nav-icon">⇄</span>Shared</a>
     <a href="settings.html"><span class="mobile-nav-icon">⚙</span>Settings</a>
   </nav>
 </body>
