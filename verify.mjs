@@ -13,6 +13,7 @@ import {
   createVault, unlockVault, unlockVaultWithRecovery, changePassword,
   recoverWithKeyAndReset,
   getSharingPublicKey, unwrapSharingPrivateKey,
+  unwrapFileDEK, wrapDEKForRecipient, unwrapSharedDEK, openFileWithSharedDEK, publicKeyFingerprint,
   encryptFileWithPassword,
 } from "./assets/js/crypto-utils.js";
 
@@ -167,6 +168,54 @@ async function run() {
     const { ciphertext, metadata } = await sealFileWithKey(file, masterKey, "k");
     sameBytes((await openFileWithKey(ciphertext, metadata, masterKey, "k")).plaintext, BODY)
       ? ok("non-extractable session key seals & opens files") : bad("non-extractable session key seals & opens files");
+  }
+
+  console.log("\n── X25519 sharing ──");
+  {
+    let x25519Ok = true;
+    try {
+      const k = await crypto.subtle.generateKey({ name: "X25519" }, true, ["deriveBits"]);
+      await crypto.subtle.deriveBits({ name: "X25519", public: k.publicKey }, k.privateKey, 256);
+    } catch { x25519Ok = false; }
+
+    if (!x25519Ok) {
+      console.log("  SKIP  X25519 ECDH not available in this runtime (works in browsers)");
+    } else {
+      const owner     = await createVault(PW);
+      const recipient = await createVault("recipient password");
+      const third     = await createVault("third party password");
+
+      const sk = "shared_file_1";
+      const file = makeFile(BODY, "shared report.pdf", "application/pdf");
+      const { ciphertext, metadata } = await sealFileWithKey(file, owner.masterKey, sk);
+
+      // owner wraps the file's DEK to the recipient's public key
+      const dek   = await unwrapFileDEK(metadata, owner.masterKey);
+      const share = await wrapDEKForRecipient(dek, getSharingPublicKey(recipient.keyvault));
+      eq("share names the X25519 KEM suite", share.alg, "X25519-HKDF-SHA256-A256GCM");
+
+      // recipient unwraps with their private key and decrypts
+      const rPriv = await unwrapSharingPrivateKey(recipient.keyvault, recipient.masterKey);
+      const rDEK  = await unwrapSharedDEK(share, rPriv);
+      const out   = await openFileWithSharedDEK(ciphertext, metadata, rDEK, sk);
+      eq("recipient gets the filename", out.name, "shared report.pdf");
+      sameBytes(out.plaintext, BODY) ? ok("recipient decrypts the shared file") : bad("recipient decrypts the shared file");
+
+      // a third party cannot unwrap the share
+      const tPriv = await unwrapSharingPrivateKey(third.keyvault, third.masterKey);
+      await expectThrow("third party can't unwrap the share", () => unwrapSharedDEK(share, tPriv));
+
+      // tampered wrapped DEK is rejected
+      const bad = { ...share, wrappedDEK: share.wrappedDEK.slice(0, -4) + "AAAA" };
+      await expectThrow("tampered share rejected", () => unwrapSharedDEK(bad, rPriv));
+
+      // fingerprints: stable + format
+      const fp1 = await publicKeyFingerprint(getSharingPublicKey(recipient.keyvault));
+      const fp2 = await publicKeyFingerprint(getSharingPublicKey(recipient.keyvault));
+      eq("fingerprint is stable", fp1, fp2);
+      (/^[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}$/.test(fp1))
+        ? ok("fingerprint format AAAA-BBBB-CCCC-DDDD") : bad("fingerprint format", fp1);
+    }
   }
 
   console.log("\n── recovery + password reset ──");

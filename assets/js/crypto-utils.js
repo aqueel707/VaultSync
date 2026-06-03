@@ -571,6 +571,94 @@ export async function unwrapSharingPrivateKey(keyvault, masterKey) {
 }
 
 // ─────────────────────────────────────────────
+//  Sharing — X25519 ECDH + HKDF sealed-box around a file's DEK
+//
+//  To share file F with recipient R:
+//    owner   : DEK   = unwrapFileDEK(F.metadata, ownerMasterKey)
+//              share = wrapDEKForRecipient(DEK, R.publicKey)
+//    recipient: DEK  = unwrapSharedDEK(share, R.privateKey)
+//               file = openFileWithSharedDEK(ciphertext, F.metadata, DEK, ownerStorageKey)
+//
+//  The file body/metadata stay encrypted under the original DEK (AAD-bound to
+//  the owner's storageKey), so only the DEK is re-wrapped per recipient.
+// ─────────────────────────────────────────────
+
+const SHARE_INFO = "vaultsync-share-v1";
+
+async function deriveShareWrappingKey(sharedBits, salt, usages) {
+  const hkdf = await crypto.subtle.importKey("raw", sharedBits, "HKDF", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey(
+    { name: "HKDF", hash: "SHA-256", salt, info: utf8(SHARE_INFO) },
+    hkdf, { name: "AES-GCM", length: DEK_BITS }, false, usages,
+  );
+}
+
+/** Owner side: recover a key-mode file's DEK (extractable) so it can be shared. */
+export async function unwrapFileDEK(metadata, masterKey) {
+  if (metadata.mode !== "key") throw new Error("Only key-mode files can be shared.");
+  return unwrapDEK(base64ToBuffer(metadata.wrappedDEK), masterKey, base64ToBuffer(metadata.dekWrapIV));
+}
+
+/** Owner side: wrap a DEK to a recipient's raw X25519 public key. */
+export async function wrapDEKForRecipient(dek, recipientPublicKeyB64) {
+  const recipientPub = await crypto.subtle.importKey(
+    "raw", base64ToBuffer(recipientPublicKeyB64), { name: "X25519" }, false, [],
+  );
+  const eph        = await crypto.subtle.generateKey({ name: "X25519" }, true, ["deriveBits"]);
+  const sharedBits = await crypto.subtle.deriveBits({ name: "X25519", public: recipientPub }, eph.privateKey, 256);
+
+  const hkdfSalt = randomBytes(SALT_BYTES);
+  const wrapKey  = await deriveShareWrappingKey(sharedBits, hkdfSalt, ["wrapKey"]);
+  const wrapIV   = randomBytes(IV_BYTES);
+  const wrapped  = await crypto.subtle.wrapKey("raw", dek, wrapKey, { name: "AES-GCM", iv: wrapIV });
+  const ephPub   = new Uint8Array(await crypto.subtle.exportKey("raw", eph.publicKey));
+
+  return {
+    alg:                "X25519-HKDF-SHA256-A256GCM",
+    ephemeralPublicKey: bufferToBase64(ephPub),
+    hkdfSalt:           bufferToBase64(hkdfSalt),
+    wrapIV:             bufferToBase64(wrapIV),
+    wrappedDEK:         bufferToBase64(new Uint8Array(wrapped)),
+  };
+}
+
+/** Recipient side: unwrap the shared DEK using their X25519 private key. */
+export async function unwrapSharedDEK(share, recipientPrivateKey) {
+  const ephPub = await crypto.subtle.importKey(
+    "raw", base64ToBuffer(share.ephemeralPublicKey), { name: "X25519" }, false, [],
+  );
+  const sharedBits = await crypto.subtle.deriveBits({ name: "X25519", public: ephPub }, recipientPrivateKey, 256);
+  const unwrapKey  = await deriveShareWrappingKey(sharedBits, base64ToBuffer(share.hkdfSalt), ["unwrapKey"]);
+  try {
+    return await crypto.subtle.unwrapKey(
+      "raw", base64ToBuffer(share.wrappedDEK), unwrapKey,
+      { name: "AES-GCM", iv: base64ToBuffer(share.wrapIV) },
+      { name: "AES-GCM", length: DEK_BITS }, false, ["encrypt", "decrypt"],
+    );
+  } catch {
+    throw new Error("Could not unwrap the shared file key — wrong recipient or tampered share.");
+  }
+}
+
+/** Recipient side: decrypt a shared file's body + metadata with the shared DEK. */
+export async function openFileWithSharedDEK(ciphertext, metadata, dek, ownerStorageKey) {
+  if (metadata.mode !== "key") throw new Error("Not a key-mode file.");
+  const aad = `v${metadata.v}|key|${ownerStorageKey}`;
+  return openWithDEK(ciphertext, metadata, dek, aad);
+}
+
+/**
+ * Short, human-comparable fingerprint of a public key (first 8 bytes of its
+ * SHA-256, as 4 hex groups). Used for out-of-band verification in the share UI
+ * to defend against directory key-substitution.
+ */
+export async function publicKeyFingerprint(publicKeyB64) {
+  const hash = await crypto.subtle.digest("SHA-256", base64ToBuffer(publicKeyB64));
+  const hex  = [...new Uint8Array(hash).slice(0, 8)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return hex.match(/.{1,4}/g).join("-").toUpperCase();
+}
+
+// ─────────────────────────────────────────────
 //  DEPRECATED — v1 password writer (PBKDF2, PLAINTEXT metadata).
 //  Kept ONLY so the existing cloud flow (upload.js / download.js) keeps
 //  working until it is migrated to key-mode in Step 3. Do not use in new code.
