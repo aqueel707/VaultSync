@@ -26,7 +26,7 @@
  */
 
 import { supabase, BUCKET } from "./supabase-client.js";
-import { createVault, unlockVault, unlockVaultWithRecovery } from "./crypto-utils.js";
+import { createVault, unlockVault, unlockVaultWithRecovery, recoverWithKeyAndReset } from "./crypto-utils.js";
 
 // ─── IndexedDB: store one non-extractable CryptoKey across pages ────────────
 
@@ -141,5 +141,18 @@ export async function openVaultWithRecovery(uid, recoveryKey) {
   const keyvault = await fetchKeyvault(uid);
   if (!keyvault) throw new Error("NO_VAULT");
   const { masterKey } = await unlockVaultWithRecovery(keyvault, recoveryKey);
+  await idbPut(MK_ID, masterKey);
+}
+
+/**
+ * Recover access after a password reset: unlock with the recovery key, re-wrap
+ * the master key under `newPassword`, save the updated keyvault, and persist the
+ * session key. After this, normal password login works again.
+ */
+export async function recoverAccount(uid, recoveryKey, newPassword) {
+  const keyvault = await fetchKeyvault(uid);
+  if (!keyvault) throw new Error("NO_VAULT");
+  const { keyvault: updated, masterKey } = await recoverWithKeyAndReset(keyvault, recoveryKey, newPassword);
+  await storeKeyvault(uid, updated);
   await idbPut(MK_ID, masterKey);
 }

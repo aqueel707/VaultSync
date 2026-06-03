@@ -63,6 +63,9 @@
           <span class="btn-label">Sign In</span>
           <span class="btn-spinner" hidden>⟳</span>
         </button>
+        <p style="text-align:center;margin-top:0.75rem;margin-bottom:0">
+          <span id="forgot-pass" class="inline-link" style="font-size:0.72rem;color:var(--text-muted)">Forgot password?</span>
+        </p>
       </div>
 
       <!-- Register -->
@@ -125,12 +128,36 @@
         </button>
       </div>
 
+      <!-- Recovery-key UNLOCK (restore access after a password reset) -->
+      <div id="recovery-unlock-panel" hidden style="margin-top:1.25rem">
+        <h2 class="settings-section-title">Restore access with your recovery key</h2>
+        <p class="settings-section-desc" style="margin-bottom:1rem">
+          You're signed in, but your vault is still locked under your previous password
+          (a password reset doesn't change your vault). Enter your recovery key to unlock
+          it and re-secure it under your current password.
+        </p>
+        <div class="field">
+          <label for="recovery-input">Recovery key</label>
+          <input type="text" id="recovery-input"
+                 placeholder="XXXX-XXXX-XXXX-…" autocomplete="off" spellcheck="false" />
+        </div>
+        <button id="btn-recovery-unlock" class="btn btn-primary full-width">
+          <span class="btn-label">Unlock &amp; restore access</span>
+          <span class="btn-spinner" hidden>⟳</span>
+        </button>
+        <p id="recovery-error" class="error-msg" hidden></p>
+        <p class="config-note" style="margin-top:0.85rem">
+          No recovery key? If you opted out when registering, the data can't be
+          recovered without your original password.
+        </p>
+      </div>
+
     </div>
   </div>
 
   <script type="module">
     import { redirectIfAuthed, navigateTo } from "../assets/js/router.js";
-    import { loginUser, registerUser }      from "../assets/js/auth.js";
+    import { loginUser, registerUser, resetPassword } from "../assets/js/auth.js";
     import * as vault                       from "../assets/js/vault.js";
 
     // Redirect already-authed users straight to dashboard.
@@ -141,9 +168,12 @@
 
     // ── DOM refs ──────────────────────────────────────────────────────────
     const $ = (id) => document.getElementById(id);
-    const authError      = $("auth-error");
-    const tabBar         = $("tab-bar");
-    const recoveryPanel  = $("recovery-panel");
+    const authError           = $("auth-error");
+    const tabBar              = $("tab-bar");
+    const recoveryPanel       = $("recovery-panel");
+    const recoveryUnlockPanel = $("recovery-unlock-panel");
+
+    let pendingUid = null, pendingPassword = null;
 
     // ── Tab switching ─────────────────────────────────────────────────────
     const tabs = document.querySelectorAll(".tab");
@@ -173,7 +203,13 @@
     }
     function showError(msg) {
       authError.textContent = msg;
-      authError.hidden      = !msg;
+      authError.className    = "error-msg";
+      authError.hidden       = !msg;
+    }
+    function showInfo(msg) {
+      authError.textContent = msg;
+      authError.className    = "toast";
+      authError.hidden       = !msg;
     }
     function friendlyError(code) {
       const map = {
@@ -219,6 +255,44 @@
       $("btn-recovery-continue").addEventListener("click", () => navigateTo("dashboard.html"));
     }
 
+    // ── Recovery-key unlock (restore access after a password reset) ────────
+    function showRecoveryUnlockPanel() {
+      tabBar.hidden              = true;
+      $("tab-login").hidden      = true;
+      $("tab-register").hidden   = true;
+      authError.hidden           = true;
+      recoveryUnlockPanel.hidden = false;
+    }
+
+    $("forgot-pass").addEventListener("click", async () => {
+      const email = $("login-email").value.trim();
+      if (!email) return showError("Enter your email above first, then click Forgot password.");
+      try {
+        await resetPassword(email);
+        showInfo("Password reset email sent. After you set a new password, sign in here — " +
+                 "you'll then be asked for your recovery key to restore your vault.");
+      } catch (err) {
+        showError(err.code ? friendlyError(err.code) : (err.message || "Couldn't send the reset email."));
+      }
+    });
+
+    const btnRecoveryUnlock = $("btn-recovery-unlock");
+    btnRecoveryUnlock.addEventListener("click", async () => {
+      const recErr = $("recovery-error");
+      const key    = $("recovery-input").value.trim();
+      if (!key) { recErr.textContent = "Enter your recovery key."; recErr.hidden = false; return; }
+      recErr.hidden = true;
+      setLoading(btnRecoveryUnlock, true);
+      try {
+        await vault.recoverAccount(pendingUid, key, pendingPassword);
+        navigateTo("dashboard.html");
+      } catch (err) {
+        recErr.textContent = err.message || "Recovery failed.";
+        recErr.hidden      = false;
+        setLoading(btnRecoveryUnlock, false);
+      }
+    });
+
     // ── Sign In ───────────────────────────────────────────────────────────
     const btnLogin = $("btn-login");
     btnLogin.addEventListener("click", async () => {
@@ -238,11 +312,12 @@
             const { recoveryKey } = await vault.provisionVault(uid, pass, { withRecovery: true });
             showRecoveryPanel(recoveryKey);
           } else {
-            // Auth OK but vault won't unlock — e.g. password was reset via Firebase
-            // without re-wrapping the vault. Recovery-key unlock lands in a later step.
-            showError("Signed in, but your vault couldn't be unlocked with this password. " +
-                      "If you recently reset your password, recovery-key unlock is coming soon.");
+            // Auth OK but vault won't unlock — e.g. the Firebase password was reset
+            // without re-wrapping the vault. Offer recovery-key unlock.
+            pendingUid      = uid;
+            pendingPassword = pass;
             setLoading(btnLogin, false);
+            showRecoveryUnlockPanel();
           }
         }
       } catch (err) {
@@ -274,7 +349,9 @@
 
     // Allow Enter to submit (ignored once the recovery panel is up).
     document.addEventListener("keydown", (e) => {
-      if (e.key !== "Enter" || !recoveryPanel.hidden) return;
+      if (e.key !== "Enter") return;
+      if (!recoveryUnlockPanel.hidden) { btnRecoveryUnlock.click(); return; }
+      if (!recoveryPanel.hidden) return;
       if ($("tab-login").classList.contains("active")) btnLogin.click();
       else btnRegister.click();
     });

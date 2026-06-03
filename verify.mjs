@@ -11,6 +11,7 @@ import {
   sealFileWithPassword, openFileWithPassword,
   sealFileWithKey, openFileWithKey, openMetadataWithKey,
   createVault, unlockVault, unlockVaultWithRecovery, changePassword,
+  recoverWithKeyAndReset,
   getSharingPublicKey, unwrapSharingPrivateKey,
   encryptFileWithPassword,
 } from "./assets/js/crypto-utils.js";
@@ -166,6 +167,40 @@ async function run() {
     const { ciphertext, metadata } = await sealFileWithKey(file, masterKey, "k");
     sameBytes((await openFileWithKey(ciphertext, metadata, masterKey, "k")).plaintext, BODY)
       ? ok("non-extractable session key seals & opens files") : bad("non-extractable session key seals & opens files");
+  }
+
+  console.log("\n── recovery + password reset ──");
+  {
+    const { keyvault, recoveryKey } = await createVault(PW);
+    const file = makeFile(BODY, "r.bin", "application/octet-stream");
+    const sk = "rk";
+    const { ciphertext, metadata } = await sealFileWithKey(file, (await unlockVault(keyvault, PW)).masterKey, sk);
+
+    const NEWPW = "post-reset password #9";
+    const { keyvault: updated, masterKey: sessionMK } =
+      await recoverWithKeyAndReset(keyvault, recoveryKey, NEWPW);
+
+    await expectThrow("recovered session key is non-extractable", () =>
+      crypto.subtle.exportKey("raw", sessionMK));
+    sameBytes((await openFileWithKey(ciphertext, metadata, sessionMK, sk)).plaintext, BODY)
+      ? ok("recovered session key opens existing file") : bad("recovered session key opens existing file");
+
+    const mkNew = (await unlockVault(updated, NEWPW)).masterKey;
+    sameBytes((await openFileWithKey(ciphertext, metadata, mkNew, sk)).plaintext, BODY)
+      ? ok("vault unlocks with the NEW password after recovery") : bad("vault unlocks with the NEW password after recovery");
+    await expectThrow("old password no longer unlocks", () => unlockVault(updated, PW));
+
+    // recovery key remains valid after the reset (recovery block unchanged)
+    const mkRec = (await unlockVaultWithRecovery(updated, recoveryKey)).masterKey;
+    sameBytes((await openFileWithKey(ciphertext, metadata, mkRec, sk)).plaintext, BODY)
+      ? ok("same recovery key still works after reset") : bad("same recovery key still works after reset");
+
+    await expectThrow("bad recovery key rejected on reset", () =>
+      recoverWithKeyAndReset(keyvault, "AAAA-BBBB-CCCC-DDDD", NEWPW));
+
+    const noRec = await createVault(PW, { withRecovery: false });
+    await expectThrow("recovery-reset refused when no recovery configured", () =>
+      recoverWithKeyAndReset(noRec.keyvault, recoveryKey, NEWPW));
   }
 
   console.log("\n── legacy v1 back-compat (cloud interim) ──");

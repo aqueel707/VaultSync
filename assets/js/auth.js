@@ -8,6 +8,7 @@
  *   registerUser(email, password)  → Promise<UserCredential>
  *   loginUser(email, password)     → Promise<UserCredential>
  *   logoutUser()                   → Promise<void>
+ *   resetPassword(email)           → Promise<void>   (sends reset email)
  *   onAuthChange(callback)         → Unsubscribe
  *   getCurrentUser()               → User | null  (synchronous snapshot)
  */
@@ -18,6 +19,7 @@ import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
   signOut,
+  sendPasswordResetEmail,
   onAuthStateChanged,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 
@@ -39,6 +41,15 @@ export async function loginUser(email, password) {
 
 export async function logoutUser() {
   return signOut(auth);
+}
+
+/**
+ * Send a Firebase password-reset email. Note this resets the FIREBASE password
+ * only — it does not re-wrap the vault, so after resetting the user will need
+ * their recovery key to restore vault access (handled by the recovery flow).
+ */
+export async function resetPassword(email) {
+  return sendPasswordResetEmail(auth, email);
 }
 
 export function onAuthChange(callback) {

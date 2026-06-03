@@ -496,6 +496,25 @@ export async function unlockVaultWithRecovery(keyvault, recoveryKeyString) {
  * re-wraps it under a key derived from the new password. No files are touched;
  * the recovery and sharing blocks remain valid (they wrap the same Master Key).
  */
+// Re-wrap a master key under a password-derived KEK. Returns the keyvault
+// fields that encode it, plus a non-extractable session copy of the key.
+async function rewrapMasterKeyForPassword(masterKey, newPassword, params) {
+  const salt      = randomBytes(SALT_BYTES);
+  const kek       = await deriveKEK(newPassword, salt, params);
+  const mkWrapIV  = randomBytes(IV_BYTES);
+  const wrappedMK = await wrapKeyWithKey(masterKey, kek, mkWrapIV);
+  const sessionMK = await unwrapMasterKey(wrappedMK, kek, mkWrapIV, false);  // non-extractable
+  return {
+    fields: {
+      kdf:       params,
+      salt:      bufferToBase64(salt),
+      mkWrapIV:  bufferToBase64(mkWrapIV),
+      wrappedMK: bufferToBase64(wrappedMK),
+    },
+    sessionMK,
+  };
+}
+
 export async function changePassword(keyvault, oldPassword, newPassword, params) {
   // Transiently materialise an EXTRACTABLE master key so it can be re-wrapped.
   // (unlockVault returns a non-extractable session key, which can't be wrapped.)
@@ -507,19 +526,35 @@ export async function changePassword(keyvault, oldPassword, newPassword, params)
     throw new Error("Incorrect password.");
   }
 
-  const newParams = params ?? keyvault.kdf ?? KDF_DEFAULTS;
-  const salt      = randomBytes(SALT_BYTES);
-  const kek       = await deriveKEK(newPassword, salt, newParams);
-  const mkWrapIV  = randomBytes(IV_BYTES);
-  const wrappedMK = await wrapKeyWithKey(masterKey, kek, mkWrapIV);
+  const newParams   = params ?? keyvault.kdf ?? KDF_DEFAULTS;
+  const { fields }  = await rewrapMasterKeyForPassword(masterKey, newPassword, newParams);
+  return { ...keyvault, ...fields };
+}
 
-  return {
-    ...keyvault,
-    kdf:       newParams,
-    salt:      bufferToBase64(salt),
-    mkWrapIV:  bufferToBase64(mkWrapIV),
-    wrappedMK: bufferToBase64(wrappedMK),
-  };
+/**
+ * Recovery flow: unlock the master key with the recovery key, then re-wrap it
+ * under a NEW password. Used after a Firebase password reset, where the vault is
+ * still wrapped under the old password. The recovery block is left untouched, so
+ * the same recovery key keeps working afterwards.
+ * @returns {{ keyvault: object, masterKey: CryptoKey }}  updated vault + session key
+ */
+export async function recoverWithKeyAndReset(keyvault, recoveryKeyString, newPassword, params) {
+  if (!keyvault.recovery) throw new Error("No recovery key was configured for this vault.");
+
+  const recWrapKey = await importWrappingKeyFromBytes(parseRecoveryKey(recoveryKeyString));
+  let masterKey;
+  try {
+    // EXTRACTABLE so it can be re-wrapped under the new password.
+    masterKey = await unwrapMasterKey(
+      base64ToBuffer(keyvault.recovery.wrappedMK), recWrapKey, base64ToBuffer(keyvault.recovery.wrapIV), true,
+    );
+  } catch {
+    throw new Error("Invalid recovery key.");
+  }
+
+  const newParams              = params ?? keyvault.kdf ?? KDF_DEFAULTS;
+  const { fields, sessionMK }  = await rewrapMasterKeyForPassword(masterKey, newPassword, newParams);
+  return { keyvault: { ...keyvault, ...fields }, masterKey: sessionMK };
 }
 
 export function getSharingPublicKey(keyvault) {
