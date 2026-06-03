@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta http-equiv="Content-Security-Policy" content="
   default-src 'self';
-  script-src  'self' 'unsafe-inline' https://www.gstatic.com https://cdn.jsdelivr.net;
+  script-src  'self' 'unsafe-inline' 'wasm-unsafe-eval' https://www.gstatic.com https://cdn.jsdelivr.net;
   style-src   'self' 'unsafe-inline' https://fonts.googleapis.com;
   font-src    'self' https://fonts.gstatic.com;
   connect-src 'self'
@@ -23,6 +23,9 @@
   <title>VaultSync — Sign In</title>
   <link rel="stylesheet" href="../assets/css/style.css" />
   <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet" />
+  <script type="importmap">
+  { "imports": { "hash-wasm": "https://cdn.jsdelivr.net/npm/hash-wasm@4.12.0/+esm" } }
+  </script>
 </head>
 <body>
   <div class="bg-grid" aria-hidden="true"></div>
@@ -38,7 +41,7 @@
       </div>
 
       <!-- Tabs -->
-      <div class="tab-bar">
+      <div class="tab-bar" id="tab-bar">
         <button class="tab active" data-tab="login">Sign In</button>
         <button class="tab"        data-tab="register">Register</button>
       </div>
@@ -75,6 +78,21 @@
             <button class="toggle-pass" id="toggle-reg-pass" aria-label="Show password">👁</button>
           </div>
         </div>
+
+        <!-- Recovery-key toggle -->
+        <div class="field" style="margin-bottom:0.5rem">
+          <label class="storage-option-label" style="padding:0;gap:0.6rem;align-items:flex-start">
+            <input type="checkbox" id="reg-recovery" checked
+                   style="margin-top:3px;accent-color:var(--accent);width:15px;height:15px;flex-shrink:0" />
+            <span style="font-size:0.72rem;color:var(--text-muted);line-height:1.5">
+              Generate a recovery key <span style="color:var(--text-dim)">(recommended)</span><br />
+              Lets you regain access if you forget your password. Uncheck for
+              maximum-secrecy mode — but if you lose your password, your data is
+              <strong>permanently unrecoverable</strong>.
+            </span>
+          </label>
+        </div>
+
         <button id="btn-register" class="btn btn-primary full-width">
           <span class="btn-label">Create Account</span>
           <span class="btn-spinner" hidden>⟳</span>
@@ -83,51 +101,80 @@
 
       <p id="auth-error" class="error-msg" hidden></p>
 
+      <!-- Recovery key (shown once, after provisioning) -->
+      <div id="recovery-panel" hidden style="margin-top:1.25rem">
+        <h2 class="settings-section-title">⚠ Save your recovery key</h2>
+        <p class="settings-section-desc" style="margin-bottom:1rem">
+          This is shown <strong>once</strong>. Store it somewhere safe — a password
+          manager, or printed. It's the only way back in if you forget your password.
+        </p>
+        <div class="output-file-item" style="align-items:center">
+          <span class="output-file-icon">🔑</span>
+          <code id="recovery-key" style="font-size:0.8rem;color:var(--accent);word-break:break-all;line-height:1.55"></code>
+        </div>
+        <div class="panel-actions" style="margin-top:1rem">
+          <button id="btn-copy-recovery" class="btn btn-ghost btn-sm">Copy</button>
+          <button id="btn-download-recovery" class="btn btn-ghost btn-sm">Download .txt</button>
+        </div>
+        <label style="display:flex;gap:0.5rem;align-items:center;margin-top:1rem;font-size:0.75rem;color:var(--text-muted);cursor:pointer">
+          <input type="checkbox" id="ack-recovery" style="accent-color:var(--accent)" />
+          I've saved my recovery key somewhere safe
+        </label>
+        <button id="btn-recovery-continue" class="btn btn-primary full-width" disabled style="margin-top:1rem">
+          Continue to VaultSync →
+        </button>
+      </div>
+
     </div>
   </div>
 
   <script type="module">
-    import { redirectIfAuthed, navigateTo }    from "../assets/js/router.js";
-    import { loginUser, registerUser } from "../assets/js/auth.js";
+    import { redirectIfAuthed, navigateTo } from "../assets/js/router.js";
+    import { loginUser, registerUser }      from "../assets/js/auth.js";
+    import * as vault                       from "../assets/js/vault.js";
 
-    // Redirect already-authed users straight to dashboard
+    // Redirect already-authed users straight to dashboard.
     await redirectIfAuthed("dashboard.html");
 
-    // ── Tab switching ──────────────────────────────────────────────────
+    // Logged-out users land here — clear any stale session key from a prior login.
+    try { await vault.lock(); } catch (e) { console.warn("vault.lock on load:", e); }
+
+    // ── DOM refs ──────────────────────────────────────────────────────────
+    const $ = (id) => document.getElementById(id);
+    const authError      = $("auth-error");
+    const tabBar         = $("tab-bar");
+    const recoveryPanel  = $("recovery-panel");
+
+    // ── Tab switching ─────────────────────────────────────────────────────
     const tabs = document.querySelectorAll(".tab");
     tabs.forEach((tab) => {
       tab.addEventListener("click", () => {
         const target = tab.dataset.tab;
         tabs.forEach((t) => t.classList.toggle("active", t.dataset.tab === target));
-        document.getElementById("tab-login").classList.toggle("active",    target === "login");
-        document.getElementById("tab-register").classList.toggle("active", target === "register");
-        document.getElementById("auth-error").hidden = true;
+        $("tab-login").classList.toggle("active",    target === "login");
+        $("tab-register").classList.toggle("active", target === "register");
+        authError.hidden = true;
       });
     });
 
-    // ── Password toggles ───────────────────────────────────────────────
+    // ── Password toggles ──────────────────────────────────────────────────
     document.querySelectorAll(".toggle-pass").forEach((btn) => {
       btn.addEventListener("click", () => {
-        const wrap  = btn.closest(".password-wrap");
-        const input = wrap.querySelector("input");
+        const input = btn.closest(".password-wrap").querySelector("input");
         input.type  = input.type === "password" ? "text" : "password";
       });
     });
 
-    // ── Helpers ────────────────────────────────────────────────────────
-    const authError = document.getElementById("auth-error");
-
+    // ── Helpers ───────────────────────────────────────────────────────────
     function setLoading(btn, loading) {
       btn.querySelector(".btn-label").hidden   = loading;
       btn.querySelector(".btn-spinner").hidden = !loading;
       btn.disabled = loading;
     }
-
     function showError(msg) {
       authError.textContent = msg;
       authError.hidden      = !msg;
     }
-
     function friendlyError(code) {
       const map = {
         "auth/invalid-email":          "Invalid email address.",
@@ -142,47 +189,94 @@
       return map[code] ?? `Error: ${code}`;
     }
 
-    // ── Sign In ────────────────────────────────────────────────────────
-    const btnLogin = document.getElementById("btn-login");
+    // ── Recovery-key panel ────────────────────────────────────────────────
+    // Shown after a vault is provisioned (new account, or migrated legacy account).
+    // The master key is already persisted at this point; "Continue" just proceeds.
+    function showRecoveryPanel(recoveryKey) {
+      tabBar.hidden            = true;
+      $("tab-login").hidden    = true;
+      $("tab-register").hidden = true;
+      authError.hidden         = true;
+      $("recovery-key").textContent = recoveryKey;
+      recoveryPanel.hidden     = false;
+
+      $("btn-copy-recovery").addEventListener("click", async () => {
+        try { await navigator.clipboard.writeText(recoveryKey); $("btn-copy-recovery").textContent = "Copied ✓"; }
+        catch { /* clipboard may be blocked; user can still select the text */ }
+      });
+      $("btn-download-recovery").addEventListener("click", () => {
+        const body = `VaultSync recovery key\n=======================\n\n${recoveryKey}\n\n` +
+          `Keep this secret and safe. It can unlock your account and decrypt your\n` +
+          `files if you forget your password. Anyone with this key has the same power.\n`;
+        const url = URL.createObjectURL(new Blob([body], { type: "text/plain" }));
+        const a = document.createElement("a");
+        a.href = url; a.download = "vaultsync-recovery-key.txt"; a.click();
+        URL.revokeObjectURL(url);
+      });
+      $("ack-recovery").addEventListener("change", (e) => {
+        $("btn-recovery-continue").disabled = !e.target.checked;
+      });
+      $("btn-recovery-continue").addEventListener("click", () => navigateTo("dashboard.html"));
+    }
+
+    // ── Sign In ───────────────────────────────────────────────────────────
+    const btnLogin = $("btn-login");
     btnLogin.addEventListener("click", async () => {
       showError("");
       setLoading(btnLogin, true);
       try {
-        await loginUser(
-          document.getElementById("login-email").value.trim(),
-          document.getElementById("login-pass").value,
-        );
-        navigateTo("dashboard.html");
+        const cred = await loginUser($("login-email").value.trim(), $("login-pass").value);
+        const uid  = cred.user.uid;
+        const pass = $("login-pass").value;
+
+        try {
+          await vault.openVault(uid, pass);
+          navigateTo("dashboard.html");
+        } catch (vErr) {
+          if (vErr.message === "NO_VAULT") {
+            // Pre-vault account → provision one now (one-time migration).
+            const { recoveryKey } = await vault.provisionVault(uid, pass, { withRecovery: true });
+            showRecoveryPanel(recoveryKey);
+          } else {
+            // Auth OK but vault won't unlock — e.g. password was reset via Firebase
+            // without re-wrapping the vault. Recovery-key unlock lands in a later step.
+            showError("Signed in, but your vault couldn't be unlocked with this password. " +
+                      "If you recently reset your password, recovery-key unlock is coming soon.");
+            setLoading(btnLogin, false);
+          }
+        }
       } catch (err) {
-        showError(friendlyError(err.code));
-      } finally {
+        showError(err.code ? friendlyError(err.code) : (err.message || "Sign-in failed."));
         setLoading(btnLogin, false);
       }
     });
 
-    // ── Register ───────────────────────────────────────────────────────
-    const btnRegister = document.getElementById("btn-register");
+    // ── Register ──────────────────────────────────────────────────────────
+    const btnRegister = $("btn-register");
     btnRegister.addEventListener("click", async () => {
       showError("");
       setLoading(btnRegister, true);
       try {
-        await registerUser(
-          document.getElementById("reg-email").value.trim(),
-          document.getElementById("reg-pass").value,
-        );
-        navigateTo("dashboard.html");
+        const withRecovery = $("reg-recovery").checked;
+        const cred = await registerUser($("reg-email").value.trim(), $("reg-pass").value);
+        const uid  = cred.user.uid;
+        const pass = $("reg-pass").value;
+
+        const { recoveryKey } = await vault.provisionVault(uid, pass, { withRecovery });
+
+        if (recoveryKey) showRecoveryPanel(recoveryKey);
+        else navigateTo("dashboard.html");   // opted out — already warned via the checkbox
       } catch (err) {
-        showError(friendlyError(err.code));
-      } finally {
+        showError(err.code ? friendlyError(err.code) : (err.message || "Couldn't create your account."));
         setLoading(btnRegister, false);
       }
     });
 
-    // Allow Enter key to submit
+    // Allow Enter to submit (ignored once the recovery panel is up).
     document.addEventListener("keydown", (e) => {
-      if (e.key !== "Enter") return;
-      const loginActive = document.getElementById("tab-login").classList.contains("active");
-      if (loginActive) btnLogin.click(); else btnRegister.click();
+      if (e.key !== "Enter" || !recoveryPanel.hidden) return;
+      if ($("tab-login").classList.contains("active")) btnLogin.click();
+      else btnRegister.click();
     });
   </script>
 </body>
