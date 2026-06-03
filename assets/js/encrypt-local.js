@@ -12,7 +12,7 @@
 
 import { requireAuth }             from "./router.js";
 import { logoutUser }              from "./auth.js";
-import { encryptFileWithPassword } from "./crypto-utils.js";
+import { sealFileWithPassword } from "./crypto-utils.js";
 import * as storageManager         from "./storage-manager.js";
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
@@ -176,7 +176,7 @@ async function handleEncrypt() {
 
   try {
     // Encrypt using the exact same pipeline as the cloud upload flow
-    const { ciphertext, metadata } = await encryptFileWithPassword(selectedFile, password);
+    const { ciphertext, metadata } = await sealFileWithPassword(selectedFile, password);
 
     // Build filenames
     const baseName   = selectedFile.name;

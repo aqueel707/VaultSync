@@ -11,7 +11,7 @@
 
 import { requireAuth }              from "./router.js";
 import { logoutUser }               from "./auth.js";
-import { decryptFileWithPassword }  from "./crypto-utils.js";
+import { openFileWithPassword }  from "./crypto-utils.js";
 import * as storageManager          from "./storage-manager.js";
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
@@ -123,7 +123,7 @@ async function handleDecrypt() {
     const metadata    = JSON.parse(metaText);
 
     // Decrypt using the exact same pipeline as the cloud download flow
-    const { plaintext, name, mimeType } = await decryptFileWithPassword(
+    const { plaintext, name, mimeType } = await openFileWithPassword(
       ciphertext, metadata, password,
     );
 

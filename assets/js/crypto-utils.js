@@ -1,27 +1,54 @@
 /**
- * crypto-utils.js
- * ───────────────
+ * crypto-utils.js  (v2)
+ * ─────────────────────
  * All cryptographic operations for VaultSync.
  * Runs entirely in the browser via the Web Crypto API.
  *
- * THIS FILE IS UNCHANGED from the original implementation.
- * Do not modify the crypto logic here.
+ * What changed from v1:
+ *   • KDF upgraded PBKDF2-SHA256(150k) → Argon2id (memory-hard, GPU-resistant).
+ *   • Introduced a per-user MASTER KEY hierarchy:
+ *         password ─Argon2id→ KEK ─wraps→ Master Key ─wraps→ per-file DEK
+ *     so the password can be rotated without re-encrypting any files, and a
+ *     recovery key can independently unwrap the Master Key.
+ *   • File METADATA (name, type, size, time) is now ENCRYPTED, not plaintext.
+ *   • Every envelope is bound with AES-GCM Additional Authenticated Data (AAD)
+ *     so ciphertext/metadata cannot be swapped or relocated undetected.
+ *   • Forward-compatible X25519 sharing keypair is provisioned in the vault.
+ *   • A legacy reader still decrypts v1 (PBKDF2, plaintext-meta) files.
+ *
+ * hash-wasm is resolved via an import map (browser) / node_modules (tests):
+ *     <script type="importmap">
+ *       { "imports": { "hash-wasm": "https://cdn.jsdelivr.net/npm/hash-wasm@4.12.0/+esm" } }
+ *     </script>
+ * The import is lazy (inside deriveKEK) so the WASM only loads on first use.
  *
  * Security model:
- *   1. A random 256-bit Data Encryption Key (DEK) encrypts each file.
- *   2. A password-derived key (PBKDF2) wraps (encrypts) the DEK.
- *   3. Only the wrapped DEK and ciphertext are stored in the cloud.
- *   4. Plaintext and the raw DEK never leave the browser.
+ *   The server only ever stores ciphertext + wrapped keys + public values.
+ *   Plaintext, the Master Key, and per-file DEKs never leave the browser.
  */
 
-const PBKDF2_ITERATIONS = 150_000;
-const PBKDF2_HASH       = "SHA-256";
-const SALT_BYTES        = 16;  // 128-bit salt
-const IV_BYTES          = 12;  // 96-bit IV recommended for AES-GCM
-const DEK_BITS          = 256; // AES-256
+// ─────────────────────────────────────────────
+//  Constants (versioned; persisted with data so they can change safely)
+// ─────────────────────────────────────────────
+
+export const FORMAT_VERSION = 2;
+
+export const KDF_DEFAULTS = Object.freeze({
+  v:           1,
+  algo:        "argon2id",
+  parallelism: 1,
+  iterations:  3,        // time cost
+  memorySize:  65536,    // KiB → 64 MiB
+  hashLength:  32,       // bytes → 256-bit key
+});
+
+const IV_BYTES       = 12;  // 96-bit IV, recommended for AES-GCM
+const SALT_BYTES     = 16;  // 128-bit KDF salt
+const DEK_BITS       = 256; // AES-256
+const RECOVERY_BYTES = 32;  // 256-bit recovery key (full entropy)
 
 // ─────────────────────────────────────────────
-//  Helpers
+//  Encoding helpers
 // ─────────────────────────────────────────────
 
 export function randomBytes(length) {
@@ -42,78 +69,494 @@ export function base64ToBuffer(b64) {
   return bytes;
 }
 
+const utf8       = (s) => new TextEncoder().encode(s);
+const fromUtf8   = (b) => new TextDecoder().decode(b);
+
 // ─────────────────────────────────────────────
-//  Key derivation (PBKDF2)
+//  Crockford base32 (recovery-key presentation)
+//  Alphabet excludes I, L, O, U to avoid ambiguity. Dash is a safe separator.
 // ─────────────────────────────────────────────
 
-async function importPasswordMaterial(password) {
-  const enc = new TextEncoder();
-  return crypto.subtle.importKey("raw", enc.encode(password), "PBKDF2", false, ["deriveKey"]);
+const B32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+function base32Encode(bytes) {
+  let out = "", buffer = 0, bits = 0;
+  for (const b of bytes) {
+    buffer = ((buffer << 8) | b) >>> 0;
+    bits += 8;
+    while (bits >= 5) { bits -= 5; out += B32[(buffer >>> bits) & 31]; }
+    buffer &= (1 << bits) - 1;
+  }
+  if (bits > 0) out += B32[(buffer << (5 - bits)) & 31];
+  return out;
 }
 
-export async function deriveKeyFromPassword(password, salt) {
-  const material = await importPasswordMaterial(password);
-  return crypto.subtle.deriveKey(
-    { name: "PBKDF2", salt, iterations: PBKDF2_ITERATIONS, hash: PBKDF2_HASH },
-    material,
-    { name: "AES-GCM", length: DEK_BITS },
-    false,
-    ["wrapKey", "unwrapKey"],
+function base32Decode(str) {
+  const clean = str.toUpperCase()
+    .replace(/O/g, "0").replace(/[IL]/g, "1").replace(/U/g, "V")
+    .replace(/[^0-9A-Z]/g, "");
+  let buffer = 0, bits = 0;
+  const out = [];
+  for (const ch of clean) {
+    const v = B32.indexOf(ch);
+    if (v < 0) continue;
+    buffer = ((buffer << 5) | v) >>> 0;
+    bits += 5;
+    if (bits >= 8) { bits -= 8; out.push((buffer >>> bits) & 0xff); buffer &= (1 << bits) - 1; }
+  }
+  return new Uint8Array(out);
+}
+
+function formatRecoveryKey(bytes) {
+  return base32Encode(bytes).match(/.{1,4}/g).join("-");
+}
+function parseRecoveryKey(str) {
+  return base32Decode(str);
+}
+
+// ─────────────────────────────────────────────
+//  Key derivation — Argon2id → AES-GCM wrapping key (KEK)
+// ─────────────────────────────────────────────
+
+export async function deriveKEK(password, salt, params = KDF_DEFAULTS) {
+  const { argon2id } = await import("hash-wasm");
+  const raw = await argon2id({
+    password:    typeof password === "string" ? utf8(password) : password,
+    salt,
+    parallelism: params.parallelism,
+    iterations:  params.iterations,
+    memorySize:  params.memorySize,
+    hashLength:  params.hashLength,
+    outputType:  "binary",
+  });
+  return crypto.subtle.importKey(
+    "raw", raw, { name: "AES-GCM" }, false, ["wrapKey", "unwrapKey"],
   );
 }
 
 // ─────────────────────────────────────────────
-//  DEK generation & wrapping
+//  Symmetric key helpers
 // ─────────────────────────────────────────────
 
-export async function generateDEK() {
-  return crypto.subtle.generateKey({ name: "AES-GCM", length: DEK_BITS }, true, ["encrypt", "decrypt"]);
+export async function generateMasterKey() {
+  // extractable so it can be wrapped; held only in memory after unlock.
+  return crypto.subtle.generateKey(
+    { name: "AES-GCM", length: DEK_BITS }, true,
+    ["wrapKey", "unwrapKey", "encrypt", "decrypt"],
+  );
 }
 
-export async function wrapDEK(dek, wrappingKey, iv) {
-  return crypto.subtle.wrapKey("raw", dek, wrappingKey, { name: "AES-GCM", iv });
+async function generateDEK() {
+  return crypto.subtle.generateKey(
+    { name: "AES-GCM", length: DEK_BITS }, true, ["encrypt", "decrypt"],
+  );
 }
 
-export async function unwrapDEK(wrappedDEK, wrappingKey, iv) {
+async function importWrappingKeyFromBytes(bytes) {
+  return crypto.subtle.importKey(
+    "raw", bytes, { name: "AES-GCM" }, false, ["wrapKey", "unwrapKey"],
+  );
+}
+
+export async function wrapKeyWithKey(keyToWrap, wrappingKey, iv) {
+  const wrapped = await crypto.subtle.wrapKey("raw", keyToWrap, wrappingKey, { name: "AES-GCM", iv });
+  return new Uint8Array(wrapped);
+}
+
+async function unwrapDEK(wrapped, wrappingKey, iv) {
   return crypto.subtle.unwrapKey(
-    "raw", wrappedDEK, wrappingKey,
+    "raw", wrapped, wrappingKey,
     { name: "AES-GCM", iv },
     { name: "AES-GCM", length: DEK_BITS },
-    false, ["encrypt", "decrypt"],
+    true, ["encrypt", "decrypt"],
+  );
+}
+
+export async function unwrapMasterKey(wrapped, wrappingKey, iv, extractable = false) {
+  // Session master keys are non-extractable: usable for wrap/unwrap/encrypt/
+  // decrypt, but their raw bytes can't be exported — this shrinks the XSS
+  // exfiltration surface. An extractable copy is materialised only transiently
+  // during password rotation (changePassword).
+  return crypto.subtle.unwrapKey(
+    "raw", wrapped, wrappingKey,
+    { name: "AES-GCM", iv },
+    { name: "AES-GCM", length: DEK_BITS },
+    extractable, ["wrapKey", "unwrapKey", "encrypt", "decrypt"],
   );
 }
 
 // ─────────────────────────────────────────────
-//  File encryption / decryption (AES-GCM)
+//  Envelope core — encrypt file + metadata under one DEK, bound by AAD
 // ─────────────────────────────────────────────
 
-export async function encryptFile(plaintext, dek, iv) {
-  return crypto.subtle.encrypt({ name: "AES-GCM", iv }, dek, plaintext);
+async function sealWithDEK(plaintext, privateMeta, dek, aadString) {
+  const aad    = utf8(aadString);
+  const fileIV = randomBytes(IV_BYTES);
+  const metaIV = randomBytes(IV_BYTES);
+
+  const fileCipher = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: fileIV, additionalData: aad }, dek, plaintext,
+  );
+  const metaCipher = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: metaIV, additionalData: aad }, dek, utf8(JSON.stringify(privateMeta)),
+  );
+
+  return {
+    ciphertext: fileCipher,                 // ArrayBuffer → the .enc payload
+    fileIV:  bufferToBase64(fileIV),
+    metaIV:  bufferToBase64(metaIV),
+    encMeta: bufferToBase64(metaCipher),
+  };
 }
 
-export async function decryptFile(ciphertext, dek, iv) {
-  return crypto.subtle.decrypt({ name: "AES-GCM", iv }, dek, ciphertext);
+async function openWithDEK(ciphertext, meta, dek, aadString) {
+  const aad = utf8(aadString);
+
+  let privateMeta;
+  try {
+    const buf = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: base64ToBuffer(meta.metaIV), additionalData: aad },
+      dek, base64ToBuffer(meta.encMeta),
+    );
+    privateMeta = JSON.parse(fromUtf8(buf));
+  } catch {
+    throw new Error("Metadata authentication failed — the file may have been tampered with or mismatched.");
+  }
+
+  let plaintext;
+  try {
+    plaintext = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: base64ToBuffer(meta.fileIV), additionalData: aad },
+      dek, ciphertext,
+    );
+  } catch {
+    throw new Error("Decryption failed — the file may be corrupted or the wrong key was used.");
+  }
+
+  return { plaintext, name: privateMeta.originalName, mimeType: privateMeta.mimeType, metadata: privateMeta };
+}
+
+function buildPrivateMeta(file, byteLength) {
+  return {
+    originalName: file.name,
+    mimeType:     file.type || "application/octet-stream",
+    size:         byteLength,
+    timestamp:    new Date().toISOString(),
+  };
 }
 
 // ─────────────────────────────────────────────
-//  High-level pipeline helpers
+//  KEY-MODE pipeline  (cloud / account — sealed under the Master Key)
 // ─────────────────────────────────────────────
 
 /**
- * Full encryption pipeline for a single file.
- * @param {File}   file
- * @param {string} password
- * @returns {Promise<{ciphertext: ArrayBuffer, metadata: object}>}
+ * @param {File}       file
+ * @param {CryptoKey}  masterKey   unlocked vault master key
+ * @param {string}     storageKey  stable per-file id (also the storage path key)
  */
+export async function sealFileWithKey(file, masterKey, storageKey) {
+  const plaintext  = await file.arrayBuffer();
+  const dek        = await generateDEK();
+  const dekWrapIV  = randomBytes(IV_BYTES);
+  const wrappedDEK = await wrapKeyWithKey(dek, masterKey, dekWrapIV);
+  const aad        = `v${FORMAT_VERSION}|key|${storageKey}`;
+
+  const sealed = await sealWithDEK(plaintext, buildPrivateMeta(file, plaintext.byteLength), dek, aad);
+
+  const metadata = {
+    v:          FORMAT_VERSION,
+    mode:       "key",
+    dekWrapIV:  bufferToBase64(dekWrapIV),
+    wrappedDEK: bufferToBase64(wrappedDEK),
+    fileIV:     sealed.fileIV,
+    metaIV:     sealed.metaIV,
+    encMeta:    sealed.encMeta,
+  };
+  return { ciphertext: sealed.ciphertext, metadata };
+}
+
+export async function openFileWithKey(ciphertext, metadata, masterKey, storageKey) {
+  if (metadata.mode !== "key") throw new Error("Not a key-mode envelope.");
+  const aad = `v${metadata.v}|key|${storageKey}`;
+
+  let dek;
+  try {
+    dek = await unwrapDEK(base64ToBuffer(metadata.wrappedDEK), masterKey, base64ToBuffer(metadata.dekWrapIV));
+  } catch {
+    throw new Error("Could not unwrap the file key — vault key mismatch.");
+  }
+  return openWithDEK(ciphertext, metadata, dek, aad);
+}
+
+/**
+ * Decrypt only the metadata (for listing) without decrypting the file body.
+ * Returns the private metadata object: { originalName, mimeType, size, timestamp }.
+ */
+export async function openMetadataWithKey(metadata, masterKey, storageKey) {
+  if (metadata.mode !== "key") throw new Error("Not a key-mode envelope.");
+  const aad = `v${metadata.v}|key|${storageKey}`;
+  let dek;
+  try {
+    dek = await unwrapDEK(base64ToBuffer(metadata.wrappedDEK), masterKey, base64ToBuffer(metadata.dekWrapIV));
+  } catch {
+    throw new Error("Could not unwrap the file key — vault key mismatch.");
+  }
+  try {
+    const buf = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: base64ToBuffer(metadata.metaIV), additionalData: utf8(aad) },
+      dek, base64ToBuffer(metadata.encMeta),
+    );
+    return JSON.parse(fromUtf8(buf));
+  } catch {
+    throw new Error("Metadata authentication failed.");
+  }
+}
+
+// ─────────────────────────────────────────────
+//  PASSWORD-MODE pipeline  (local export — self-contained, portable)
+// ─────────────────────────────────────────────
+
+export async function sealFileWithPassword(file, password, params = KDF_DEFAULTS) {
+  const plaintext  = await file.arrayBuffer();
+  const salt       = randomBytes(SALT_BYTES);
+  const fileId     = bufferToBase64(randomBytes(12));
+  const kek        = await deriveKEK(password, salt, params);
+  const dek        = await generateDEK();
+  const dekWrapIV  = randomBytes(IV_BYTES);
+  const wrappedDEK = await wrapKeyWithKey(dek, kek, dekWrapIV);
+  const aad        = `v${FORMAT_VERSION}|password|${fileId}`;
+
+  const sealed = await sealWithDEK(plaintext, buildPrivateMeta(file, plaintext.byteLength), dek, aad);
+
+  const metadata = {
+    v:          FORMAT_VERSION,
+    mode:       "password",
+    kdf:        params,
+    salt:       bufferToBase64(salt),
+    fileId,
+    dekWrapIV:  bufferToBase64(dekWrapIV),
+    wrappedDEK: bufferToBase64(wrappedDEK),
+    fileIV:     sealed.fileIV,
+    metaIV:     sealed.metaIV,
+    encMeta:    sealed.encMeta,
+  };
+  return { ciphertext: sealed.ciphertext, metadata };
+}
+
+export async function openFileWithPassword(ciphertext, metadata, password) {
+  // Legacy v1 detection: no version field, or plaintext originalName present.
+  if (!metadata.v || metadata.v === 1 || metadata.originalName !== undefined) {
+    return openLegacyV1(ciphertext, metadata, password);
+  }
+  if (metadata.mode !== "password") throw new Error("Not a password-mode envelope.");
+
+  const kek = await deriveKEK(password, base64ToBuffer(metadata.salt), metadata.kdf ?? KDF_DEFAULTS);
+  const aad = `v${metadata.v}|password|${metadata.fileId}`;
+
+  let dek;
+  try {
+    dek = await unwrapDEK(base64ToBuffer(metadata.wrappedDEK), kek, base64ToBuffer(metadata.dekWrapIV));
+  } catch {
+    throw new Error("Incorrect password — unable to unwrap the encryption key.");
+  }
+  return openWithDEK(ciphertext, metadata, dek, aad);
+}
+
+// ─────────────────────────────────────────────
+//  Legacy v1 reader  (PBKDF2-SHA256 150k, plaintext metadata, no AAD)
+//  Read-only: lets old files still decrypt. We never write this format.
+// ─────────────────────────────────────────────
+
+async function openLegacyV1(ciphertext, meta, password) {
+  const salt     = base64ToBuffer(meta.salt);
+  const material = await crypto.subtle.importKey("raw", utf8(password), "PBKDF2", false, ["deriveKey"]);
+  const kek      = await crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt, iterations: 150000, hash: "SHA-256" },
+    material, { name: "AES-GCM", length: 256 }, false, ["wrapKey", "unwrapKey"],
+  );
+
+  let dek;
+  try {
+    dek = await crypto.subtle.unwrapKey(
+      "raw", base64ToBuffer(meta.wrappedDEK), kek,
+      { name: "AES-GCM", iv: base64ToBuffer(meta.dekIV) },
+      { name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"],
+    );
+  } catch {
+    throw new Error("Incorrect password — unable to unwrap the encryption key (legacy file).");
+  }
+
+  let plaintext;
+  try {
+    plaintext = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: base64ToBuffer(meta.fileIV) }, dek, ciphertext,
+    );
+  } catch {
+    throw new Error("Decryption failed — the legacy file may be corrupted or the wrong password was used.");
+  }
+
+  return { plaintext, name: meta.originalName, mimeType: meta.mimeType, metadata: meta };
+}
+
+// ─────────────────────────────────────────────
+//  Account vault — Master Key wrapped by password-KEK and recovery key
+// ─────────────────────────────────────────────
+
+/**
+ * Create a fresh vault for a new account.
+ * @returns {{ keyvault: object, recoveryKey: string, masterKey: CryptoKey }}
+ *   keyvault    → safe to persist server-side (only wrapped keys + public values)
+ *   recoveryKey → show ONCE to the user; never stored in plaintext anywhere
+ *   masterKey   → hold in memory for this session
+ */
+export async function createVault(password, { params = KDF_DEFAULTS, withRecovery = true } = {}) {
+  const salt      = randomBytes(SALT_BYTES);
+  const kek       = await deriveKEK(password, salt, params);
+  const masterKey = await generateMasterKey();   // extractable: needed to wrap below
+
+  const mkWrapIV          = randomBytes(IV_BYTES);
+  const wrappedMKPassword = await wrapKeyWithKey(masterKey, kek, mkWrapIV);
+
+  // OPTIONAL recovery escrow. If the user opts out, the password becomes the
+  // SOLE secret: no second wrapped copy of the master key exists anywhere, and
+  // losing the password means the data is permanently unrecoverable (by design).
+  let recovery = null, recoveryKey = null;
+  if (withRecovery) {
+    const recoveryBytes     = randomBytes(RECOVERY_BYTES);   // full entropy → direct wrapping key
+    const recWrapKey        = await importWrappingKeyFromBytes(recoveryBytes);
+    const recIV             = randomBytes(IV_BYTES);
+    const wrappedMKRecovery = await wrapKeyWithKey(masterKey, recWrapKey, recIV);
+    recovery    = { wrapIV: bufferToBase64(recIV), wrappedMK: bufferToBase64(wrappedMKRecovery) };
+    recoveryKey = formatRecoveryKey(recoveryBytes);
+  }
+
+  // Forward-compatible X25519 sharing keypair. Degrades gracefully if the
+  // browser lacks X25519 in Web Crypto (provisioned later on unlock instead).
+  let sharing = null;
+  try {
+    const kp     = await crypto.subtle.generateKey({ name: "X25519" }, true, ["deriveBits"]);
+    const pubRaw = new Uint8Array(await crypto.subtle.exportKey("raw", kp.publicKey));
+    const privIV = randomBytes(IV_BYTES);
+    const wrapped = new Uint8Array(
+      await crypto.subtle.wrapKey("pkcs8", kp.privateKey, masterKey, { name: "AES-GCM", iv: privIV }),
+    );
+    sharing = {
+      alg:        "X25519",
+      publicKey:  bufferToBase64(pubRaw),
+      privWrapIV: bufferToBase64(privIV),
+      wrappedPriv: bufferToBase64(wrapped),
+    };
+  } catch (e) {
+    console.warn("Sharing keypair not provisioned (X25519 unsupported here):", e?.message);
+  }
+
+  const keyvault = {
+    v:         1,
+    kdf:       params,
+    salt:      bufferToBase64(salt),
+    mkWrapIV:  bufferToBase64(mkWrapIV),
+    wrappedMK: bufferToBase64(wrappedMKPassword),
+    recovery,
+    sharing,
+    createdAt: new Date().toISOString(),
+  };
+
+  // Return a NON-extractable session master key; the extractable one used for
+  // wrapping above goes out of scope and is collected.
+  const sessionMK = await unwrapMasterKey(wrappedMKPassword, kek, mkWrapIV, false);
+  return { keyvault, recoveryKey, masterKey: sessionMK };
+}
+
+export async function unlockVault(keyvault, password) {
+  const kek = await deriveKEK(password, base64ToBuffer(keyvault.salt), keyvault.kdf ?? KDF_DEFAULTS);
+  try {
+    const masterKey = await unwrapMasterKey(base64ToBuffer(keyvault.wrappedMK), kek, base64ToBuffer(keyvault.mkWrapIV));
+    return { masterKey };
+  } catch {
+    throw new Error("Incorrect password.");
+  }
+}
+
+export async function unlockVaultWithRecovery(keyvault, recoveryKeyString) {
+  if (!keyvault.recovery) throw new Error("No recovery key was configured for this vault.");
+  const bytes      = parseRecoveryKey(recoveryKeyString);
+  const recWrapKey = await importWrappingKeyFromBytes(bytes);
+  try {
+    const masterKey = await unwrapMasterKey(
+      base64ToBuffer(keyvault.recovery.wrappedMK), recWrapKey, base64ToBuffer(keyvault.recovery.wrapIV), false,
+    );
+    return { masterKey };
+  } catch {
+    throw new Error("Invalid recovery key.");
+  }
+}
+
+/**
+ * Rotate the password. Unwraps the Master Key with the old password and
+ * re-wraps it under a key derived from the new password. No files are touched;
+ * the recovery and sharing blocks remain valid (they wrap the same Master Key).
+ */
+export async function changePassword(keyvault, oldPassword, newPassword, params) {
+  // Transiently materialise an EXTRACTABLE master key so it can be re-wrapped.
+  // (unlockVault returns a non-extractable session key, which can't be wrapped.)
+  const oldKek = await deriveKEK(oldPassword, base64ToBuffer(keyvault.salt), keyvault.kdf ?? KDF_DEFAULTS);
+  let masterKey;
+  try {
+    masterKey = await unwrapMasterKey(base64ToBuffer(keyvault.wrappedMK), oldKek, base64ToBuffer(keyvault.mkWrapIV), true);
+  } catch {
+    throw new Error("Incorrect password.");
+  }
+
+  const newParams = params ?? keyvault.kdf ?? KDF_DEFAULTS;
+  const salt      = randomBytes(SALT_BYTES);
+  const kek       = await deriveKEK(newPassword, salt, newParams);
+  const mkWrapIV  = randomBytes(IV_BYTES);
+  const wrappedMK = await wrapKeyWithKey(masterKey, kek, mkWrapIV);
+
+  return {
+    ...keyvault,
+    kdf:       newParams,
+    salt:      bufferToBase64(salt),
+    mkWrapIV:  bufferToBase64(mkWrapIV),
+    wrappedMK: bufferToBase64(wrappedMK),
+  };
+}
+
+export function getSharingPublicKey(keyvault) {
+  return keyvault?.sharing?.publicKey ?? null;
+}
+
+export async function unwrapSharingPrivateKey(keyvault, masterKey) {
+  if (!keyvault?.sharing) throw new Error("No sharing key in this vault.");
+  return crypto.subtle.unwrapKey(
+    "pkcs8", base64ToBuffer(keyvault.sharing.wrappedPriv), masterKey,
+    { name: "AES-GCM", iv: base64ToBuffer(keyvault.sharing.privWrapIV) },
+    { name: "X25519" }, true, ["deriveBits"],
+  );
+}
+
+// ─────────────────────────────────────────────
+//  DEPRECATED — v1 password writer (PBKDF2, PLAINTEXT metadata).
+//  Kept ONLY so the existing cloud flow (upload.js / download.js) keeps
+//  working until it is migrated to key-mode in Step 3. Do not use in new code.
+//  `decryptFileWithPassword` routes through openFileWithPassword, so it reads
+//  both this v1 format and the new v2 password envelope.
+// ─────────────────────────────────────────────
+
 export async function encryptFileWithPassword(file, password) {
-  const plaintext   = await file.arrayBuffer();
-  const salt        = randomBytes(SALT_BYTES);
-  const fileIV      = randomBytes(IV_BYTES);
-  const dekIV       = randomBytes(IV_BYTES);
-  const wrappingKey = await deriveKeyFromPassword(password, salt);
-  const dek         = await generateDEK();
-  const ciphertext  = await encryptFile(plaintext, dek, fileIV);
-  const wrappedDEK  = await wrapDEK(dek, wrappingKey, dekIV);
+  const plaintext = await file.arrayBuffer();
+  const salt      = randomBytes(SALT_BYTES);
+  const fileIV    = randomBytes(IV_BYTES);
+  const dekIV     = randomBytes(IV_BYTES);
+
+  const material    = await crypto.subtle.importKey("raw", utf8(password), "PBKDF2", false, ["deriveKey"]);
+  const wrappingKey = await crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt, iterations: 150000, hash: "SHA-256" },
+    material, { name: "AES-GCM", length: 256 }, false, ["wrapKey", "unwrapKey"],
+  );
+  const dek        = await generateDEK();
+  const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv: fileIV }, dek, plaintext);
+  const wrappedDEK = await crypto.subtle.wrapKey("raw", dek, wrappingKey, { name: "AES-GCM", iv: dekIV });
 
   const metadata = {
     originalName: file.name,
@@ -121,42 +564,13 @@ export async function encryptFileWithPassword(file, password) {
     salt:         bufferToBase64(salt),
     fileIV:       bufferToBase64(fileIV),
     dekIV:        bufferToBase64(dekIV),
-    wrappedDEK:   bufferToBase64(wrappedDEK),
+    wrappedDEK:   bufferToBase64(new Uint8Array(wrappedDEK)),
     size:         plaintext.byteLength,
     timestamp:    new Date().toISOString(),
   };
-
   return { ciphertext, metadata };
 }
 
-/**
- * Full decryption pipeline for a single file.
- * @param {ArrayBuffer} ciphertext
- * @param {object}      metadata
- * @param {string}      password
- * @returns {Promise<{plaintext: ArrayBuffer, name: string, mimeType: string}>}
- */
 export async function decryptFileWithPassword(ciphertext, metadata, password) {
-  const salt       = base64ToBuffer(metadata.salt);
-  const fileIV     = base64ToBuffer(metadata.fileIV);
-  const dekIV      = base64ToBuffer(metadata.dekIV);
-  const wrappedDEK = base64ToBuffer(metadata.wrappedDEK);
-
-  const wrappingKey = await deriveKeyFromPassword(password, salt);
-
-  let dek;
-  try {
-    dek = await unwrapDEK(wrappedDEK, wrappingKey, dekIV);
-  } catch {
-    throw new Error("Incorrect password — unable to unwrap the encryption key.");
-  }
-
-  let plaintext;
-  try {
-    plaintext = await decryptFile(ciphertext, dek, fileIV);
-  } catch {
-    throw new Error("Decryption failed — the file may be corrupted or the wrong password was used.");
-  }
-
-  return { plaintext, name: metadata.originalName, mimeType: metadata.mimeType };
+  return openFileWithPassword(ciphertext, metadata, password);
 }

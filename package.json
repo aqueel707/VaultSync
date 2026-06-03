@@ -1,0 +1,13 @@
+{
+  "name": "vaultsync",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Client-side encrypted storage — crypto test harness",
+  "scripts": {
+    "test": "node verify.mjs"
+  },
+  "devDependencies": {
+    "hash-wasm": "^4.12.0"
+  }
+}
