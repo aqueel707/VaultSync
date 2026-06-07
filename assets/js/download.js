@@ -17,6 +17,7 @@ import * as vault           from "./vault.js";
 import * as sharing         from "./sharing.js";
 import { lookupRecipient }  from "./directory.js";
 import { supabase, BUCKET } from "./supabase-client.js";
+import * as manifest        from "./manifest.js";
 
 // Above this size, key-mode v3 files stream straight to disk (when the browser
 // supports the File System Access API and storage is the managed app bucket).
@@ -153,6 +154,62 @@ async function loadFileList() {
 
   const anyLocked = entries.some((e) => e.locked);
   renderFileList(anyLocked);
+
+  // Integrity manifest check — app storage only, non-blocking, best-effort.
+  if (masterKey && storageManager.getMode() !== "user") {
+    runIntegrityCheck(masterKey).catch((e) => console.warn("Integrity check failed:", e));
+  } else {
+    clearIntegrityBanner();
+  }
+}
+
+async function runIntegrityCheck(masterKey) {
+  const result = await manifest.checkIntegrity(
+    user.uid, masterKey,
+    entries.map((e) => ({ storageKey: e.storageKey, size: e.displayMeta?.size })),
+  );
+  renderIntegrityBanner(result);
+}
+
+// ─── Integrity banner ───────────────────────────────────────────────────────
+
+let integrityBannerEl = null;
+
+function integrityBanner() {
+  if (!integrityBannerEl) {
+    integrityBannerEl = document.createElement("div");
+    integrityBannerEl.id = "integrity-banner";
+    integrityBannerEl.style.cssText =
+      "margin:0 0 1rem;padding:.7rem .9rem;border-radius:8px;font-size:.9rem;border:1px solid;display:none;";
+    fileListEl.parentNode.insertBefore(integrityBannerEl, fileListEl);
+  }
+  return integrityBannerEl;
+}
+
+function clearIntegrityBanner() {
+  if (integrityBannerEl) integrityBannerEl.style.display = "none";
+}
+
+function renderIntegrityBanner(result) {
+  const el = integrityBanner();
+  if (!result || result.status === "ok" || result.status === "skip") { el.style.display = "none"; return; }
+
+  let msg;
+  if (result.status === "tampered") {
+    msg = "⚠ Your file manifest failed authentication — it may have been tampered with. Review your files carefully.";
+  } else {
+    const parts = [];
+    if (result.missing?.length) parts.push(`${result.missing.length} file(s) recorded in your vault are missing from storage`);
+    if (result.rolledBack)      parts.push("your file index may have been rolled back to an older version");
+    msg = `⚠ Integrity check — ${parts.join("; ")}.`;
+  }
+
+  const danger = result.status === "tampered";
+  el.textContent       = msg;
+  el.style.background   = danger ? "rgba(255,80,80,.12)" : "rgba(255,200,60,.12)";
+  el.style.borderColor  = danger ? "rgba(255,80,80,.5)"  : "rgba(255,200,60,.5)";
+  el.style.color        = danger ? "#ff8a8a"             : "#ffd166";
+  el.style.display      = "block";
 }
 
 function renderFileList(showLockBanner) {
@@ -361,6 +418,15 @@ btnDelete?.addEventListener("click", async () => {
 
   try {
     await storageManager.deleteFile(user.uid, selected.storageKey);
+
+    if (storageManager.getMode() !== "user") {
+      const mk = await vault.getMasterKey();
+      if (mk) {
+        try { await manifest.removeFileFromManifest(user.uid, mk, selected.storageKey); }
+        catch (e) { console.warn("Manifest update (remove) failed:", e); }
+      }
+    }
+
     downloadPanel.hidden = true;
     selected             = null;
     await loadFileList();

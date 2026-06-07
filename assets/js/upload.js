@@ -12,6 +12,7 @@ import { logoutUser }      from "./auth.js";
 import { sealFileStreamWithKey } from "./crypto-utils.js";
 import * as storageManager from "./storage-manager.js";
 import * as vault          from "./vault.js";
+import * as manifest       from "./manifest.js";
 
 // ─── Boot ─────────────────────────────────────────────────────────────────
 
@@ -158,6 +159,15 @@ async function handleUpload() {
         user.uid, storageKey, ciphertext, metadata,
         (pct, step) => updateProgress(30 + Math.round(pct * 0.65), `${prefix} — ${step}`),
       );
+
+      // Record in the integrity manifest (app storage only; never fail the upload over it).
+      if (storageManager.getMode() !== "user") {
+        try {
+          await manifest.addFileToManifest(user.uid, masterKey, {
+            storageKey, size: file.size, addedAt: new Date().toISOString(),
+          });
+        } catch (e) { console.warn("Manifest update (add) failed:", e); }
+      }
 
       ok++;
     } catch (err) {
