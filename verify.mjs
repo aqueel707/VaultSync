@@ -11,6 +11,7 @@ import {
   sealFileWithPassword, openFileWithPassword,
   sealFileWithKey, openFileWithKey, openMetadataWithKey, generateMasterKey,
   sealFileStreamWithKey, openFileStreamWithKey, decryptStreamToSink,
+  sealManifest, openManifest, reconcileManifest,
   createVault, unlockVault, unlockVaultWithRecovery, changePassword,
   recoverWithKeyAndReset,
   wrapMasterKeyWithPRF, unwrapMasterKeyWithPRF,
@@ -366,6 +367,59 @@ async function run() {
         return decryptStreamToSink(mkStream(u, 100), metadata, masterKey, sk, () => {});
       });
     }
+  }
+
+  console.log("\n── integrity manifest (signed file index) ──");
+  {
+    const masterKey = await generateMasterKey();
+    const uid = "user-abc";
+    const body = {
+      seq: 3,
+      updatedAt: new Date().toISOString(),
+      files: [
+        { storageKey: "k_charlie", size: 10, addedAt: "2026-01-03" },
+        { storageKey: "k_alpha",   size: 20, addedAt: "2026-01-01" },
+        { storageKey: "k_bravo",   size: 30, addedAt: "2026-01-02" },
+      ],
+    };
+
+    const doc = await sealManifest(body, masterKey, uid);
+    eq("manifest doc is versioned", doc.v, 1);
+    eq("manifest body not in plaintext", doc.files, undefined);
+
+    const out = await openManifest(doc, masterKey, uid);
+    eq("manifest round-trip seq", out.seq, 3);
+    eq("manifest file count", out.files.length, 3);
+    eq("manifest files canonically sorted", out.files.map((f) => f.storageKey).join(","), "k_alpha,k_bravo,k_charlie");
+
+    // order-independence of the sealed body
+    const reordered = { ...body, files: [body.files[1], body.files[2], body.files[0]] };
+    const out2 = await openManifest(await sealManifest(reordered, masterKey, uid), masterKey, uid);
+    eq("manifest canonical regardless of input order",
+       out2.files.map((f) => f.storageKey).join(","), "k_alpha,k_bravo,k_charlie");
+
+    const foreignMK = await generateMasterKey();
+    await expectThrow("manifest foreign master key rejected", () =>
+      openManifest(doc, foreignMK, uid));
+    await expectThrow("manifest wrong uid (AAD) rejected", () =>
+      openManifest(doc, masterKey, "someone-else"));
+    await expectThrow("manifest ciphertext tamper rejected", () => {
+      const i = 5;
+      const swap = doc.ct[i] === "A" ? "B" : "A";
+      const t = { ...doc, ct: doc.ct.slice(0, i) + swap + doc.ct.slice(i + 1) };
+      return openManifest(t, masterKey, uid);
+    });
+
+    // reconcile against the live listing
+    const present = ["k_alpha", "k_bravo", "k_charlie"];
+    eq("reconcile ok when listing matches", reconcileManifest(out, present).ok, true);
+
+    const deleted = reconcileManifest(out, ["k_alpha", "k_charlie"]);     // k_bravo suppressed
+    eq("reconcile flags a deleted/suppressed file", deleted.missing.join(","), "k_bravo");
+    eq("reconcile deleted => not ok", deleted.ok, false);
+
+    const injected = reconcileManifest(out, ["k_alpha", "k_bravo", "k_charlie", "k_evil"]);
+    eq("reconcile flags an injected file", injected.extra.join(","), "k_evil");
   }
 
   console.log("\n── legacy v1 back-compat (cloud interim) ──");

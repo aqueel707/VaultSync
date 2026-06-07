@@ -970,3 +970,93 @@ export async function encryptFileWithPassword(file, password) {
 export async function decryptFileWithPassword(ciphertext, metadata, password) {
   return openFileWithPassword(ciphertext, metadata, password);
 }
+
+// ─────────────────────────────────────────────
+//  Integrity manifest — a signed, authenticated index of the whole file set
+//
+//  Per-file AEAD already catches bit-flips, relocation, and cross-file swaps,
+//  but it cannot detect a file that is simply *deleted* or *omitted* from the
+//  listing, nor one *injected* into your folder. The manifest closes that gap:
+//  a single document, sealed under the master key (AES-GCM + DEK wrap, AAD bound
+//  to the uid), recording exactly which storage keys should exist. Comparing it
+//  against the live listing surfaces missing / unexpected files.
+//
+//  Confidentiality is incidental (the server already sees object names + sizes);
+//  the point is authenticity + completeness. A monotonic `seq` supports rollback
+//  detection once a device pins the last-seen value (next slice).
+// ─────────────────────────────────────────────
+
+const MANIFEST_VERSION = 1;
+
+function canonicalManifest(body) {
+  const files = (body.files || [])
+    .map((f) => ({ storageKey: f.storageKey, size: f.size ?? null, addedAt: f.addedAt ?? null }))
+    .sort((a, b) => (a.storageKey < b.storageKey ? -1 : a.storageKey > b.storageKey ? 1 : 0));
+  return JSON.stringify({ seq: body.seq ?? 0, updatedAt: body.updatedAt ?? null, files });
+}
+
+/**
+ * Seal a manifest body under the master key.
+ * @param {{seq:number, updatedAt:string, files:Array<{storageKey:string,size?:number,addedAt?:string}>}} body
+ * @param {CryptoKey} masterKey
+ * @param {string}    uid   bound into the AAD (defeats cross-account replay)
+ * @returns {object} the document to store at users/<uid>/manifest.json
+ */
+export async function sealManifest(body, masterKey, uid) {
+  const dek = await generateDEK();
+  const aad = utf8(`v${MANIFEST_VERSION}|manifest|${uid}`);
+  const iv  = randomBytes(IV_BYTES);
+  const ct  = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv, additionalData: aad }, dek, utf8(canonicalManifest(body)),
+  );
+  const dekWrapIV  = randomBytes(IV_BYTES);
+  const wrappedDEK = await wrapKeyWithKey(dek, masterKey, dekWrapIV);
+  return {
+    v:          MANIFEST_VERSION,
+    dekWrapIV:  bufferToBase64(dekWrapIV),
+    wrappedDEK: bufferToBase64(wrappedDEK),
+    iv:         bufferToBase64(iv),
+    ct:         bufferToBase64(new Uint8Array(ct)),
+  };
+}
+
+/**
+ * Open + authenticate a manifest document.
+ * @returns {{seq:number, updatedAt:string, files:Array}} the body, or throws on tamper / wrong vault.
+ */
+export async function openManifest(doc, masterKey, uid) {
+  if (!doc || doc.v !== MANIFEST_VERSION) throw new Error("Unsupported manifest version.");
+  const aad = utf8(`v${doc.v}|manifest|${uid}`);
+
+  let dek;
+  try {
+    dek = await unwrapDEK(base64ToBuffer(doc.wrappedDEK), masterKey, base64ToBuffer(doc.dekWrapIV));
+  } catch {
+    throw new Error("Could not unwrap the manifest key — vault key mismatch.");
+  }
+
+  try {
+    const buf = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: base64ToBuffer(doc.iv), additionalData: aad }, dek, base64ToBuffer(doc.ct),
+    );
+    return JSON.parse(fromUtf8(buf));
+  } catch {
+    throw new Error("Manifest authentication failed (tampered or wrong vault).");
+  }
+}
+
+/**
+ * Compare a manifest body against the storage keys actually present.
+ * @param {{files:Array<{storageKey:string}>}} manifestBody
+ * @param {string[]} actualStorageKeys
+ * @returns {{ ok:boolean, missing:string[], extra:string[] }}
+ *   missing = recorded but absent (deleted / suppressed);
+ *   extra   = present but unrecorded (injected / unexpected).
+ */
+export function reconcileManifest(manifestBody, actualStorageKeys) {
+  const inManifest = new Set((manifestBody?.files || []).map((f) => f.storageKey));
+  const inStorage  = new Set(actualStorageKeys || []);
+  const missing = [...inManifest].filter((k) => !inStorage.has(k));
+  const extra   = [...inStorage].filter((k) => !inManifest.has(k));
+  return { ok: missing.length === 0 && extra.length === 0, missing, extra };
+}
