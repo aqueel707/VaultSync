@@ -10,11 +10,17 @@
 
 import { requireAuth, navigateTo, markLoggedOut } from "./router.js";
 import { logoutUser }       from "./auth.js";
-import { openFileWithKey, openFileWithPassword, openMetadataWithKey, publicKeyFingerprint } from "./crypto-utils.js";
+import { openFileWithKey, openFileWithPassword, openMetadataWithKey, publicKeyFingerprint,
+         openFileStreamWithKey, decryptStreamToSink } from "./crypto-utils.js";
 import * as storageManager  from "./storage-manager.js";
 import * as vault           from "./vault.js";
 import * as sharing         from "./sharing.js";
 import { lookupRecipient }  from "./directory.js";
+import { supabase, BUCKET } from "./supabase-client.js";
+
+// Above this size, key-mode v3 files stream straight to disk (when the browser
+// supports the File System Access API and storage is the managed app bucket).
+const STREAM_DL_THRESHOLD = 8 * 1024 * 1024;   // 8 MiB
 
 // ─── Boot ─────────────────────────────────────────────────────────────────
 
@@ -260,13 +266,29 @@ btnDownload.addEventListener("click", handleDownload);
 async function handleDownload() {
   if (!selected) return;
 
-  const isV1 = selected.metadata?.mode !== "key";
+  const meta = selected.metadata;
+  const isV1 = meta?.mode !== "key";
   if (isV1 && !decPassword.value) return showError(dlError, "Please enter the decryption password.");
 
   showError(dlError, "");
   setLoading(btnDownload, true);
 
   try {
+    const isV3   = meta?.mode === "key" && meta?.alg === "AES-256-GCM-STREAM";
+    const size   = selected.displayMeta?.size ?? 0;
+    const canStream = isV3
+      && ("showSaveFilePicker" in window)
+      && storageManager.getMode() !== "user"   // signed URL targets the app bucket
+      && size >= STREAM_DL_THRESHOLD;
+
+    if (canStream) {
+      const masterKey = await vault.getMasterKey();
+      if (!masterKey) throw new Error("Your vault is locked. Sign out and sign in again.");
+      await streamingDownload(selected, masterKey);
+      return;
+    }
+
+    // Buffered path — handles v1, v2, v3-small, Firefox/no-FSA, and user buckets.
     const { ciphertext, metadata } = await storageManager.downloadEncryptedFile(
       user.uid, selected.storageKey,
     );
@@ -275,7 +297,9 @@ async function handleDownload() {
     if (metadata.mode === "key") {
       const masterKey = await vault.getMasterKey();
       if (!masterKey) throw new Error("Your vault is locked. Sign out and sign in again.");
-      result = await openFileWithKey(ciphertext, metadata, masterKey, selected.storageKey);
+      result = metadata.alg === "AES-256-GCM-STREAM"
+        ? await openFileStreamWithKey(ciphertext, metadata, masterKey, selected.storageKey)
+        : await openFileWithKey(ciphertext, metadata, masterKey, selected.storageKey);
     } else {
       result = await openFileWithPassword(ciphertext, metadata, decPassword.value);
     }
@@ -294,6 +318,38 @@ async function handleDownload() {
     showError(dlError, err.message || "Decryption failed. Please check your password.");
   } finally {
     setLoading(btnDownload, false);
+  }
+}
+
+// Stream a large v3 file from the app bucket straight to a user-chosen file on
+// disk: signed URL → fetch().body → decrypt segment-by-segment → WritableStream.
+async function streamingDownload(entry, masterKey) {
+  const name = entry.displayMeta?.originalName || "download";
+
+  let handle;
+  try {
+    handle = await window.showSaveFilePicker({ suggestedName: name });
+  } catch (e) {
+    if (e?.name === "AbortError") return;   // user dismissed the save dialog
+    throw e;
+  }
+
+  const writable = await handle.createWritable();
+  try {
+    const path = `users/${user.uid}/files/${entry.storageKey}.enc`;
+    const { data, error } = await supabase.storage.from(BUCKET).createSignedUrl(path, 180);
+    if (error || !data?.signedUrl) throw new Error(`Couldn't get a download URL: ${error?.message || "unknown error"}`);
+
+    const resp = await fetch(data.signedUrl);
+    if (!resp.ok || !resp.body) throw new Error(`Download failed (HTTP ${resp.status}).`);
+
+    await decryptStreamToSink(resp.body, entry.metadata, masterKey, entry.storageKey, async (chunk) => {
+      await writable.write(chunk);
+    });
+    await writable.close();
+  } catch (e) {
+    try { await writable.abort(); } catch { /* ignore */ }
+    throw e;
   }
 }
 

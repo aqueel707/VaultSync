@@ -313,6 +313,236 @@ export async function openMetadataWithKey(metadata, masterKey, storageKey) {
 }
 
 // ─────────────────────────────────────────────
+//  STREAMING envelope (v3) — chunked AES-GCM for large files
+//
+//  The body is split into fixed-size segments, each encrypted under the same
+//  DEK with a STRUCTURED 12-byte nonce:
+//
+//      nonce = noncePrefix(7) ‖ uint32_be(segmentIndex) ‖ lastFlag(1)
+//
+//  This is the "STREAM" online-AEAD construction: the per-segment index defeats
+//  reordering, the last-segment flag defeats truncation, and a fresh random
+//  prefix per file rules out cross-file nonce reuse. File-level binding (the
+//  storage key) rides in the AAD, exactly like the v2 envelope. The encrypted
+//  file metadata (encMeta) is byte-for-byte the v2 layout, so listing via
+//  openMetadataWithKey works on a v3 envelope with no change.
+//
+//  These helpers take whole buffers today; the on-disk segment format is what a
+//  true streaming reader/writer (next slice) will emit and consume verbatim.
+// ─────────────────────────────────────────────
+
+const STREAM_VERSION     = 3;
+const STREAM_ALG         = "AES-256-GCM-STREAM";
+const DEFAULT_SEGMENT    = 256 * 1024;   // 256 KiB plaintext per segment
+const NONCE_PREFIX_BYTES = 7;
+const GCM_TAG_BYTES      = 16;
+
+function streamNonce(prefix, index, isLast) {
+  const nonce = new Uint8Array(IV_BYTES);                                   // 12 bytes
+  nonce.set(prefix, 0);                                                     // [0..6]
+  new DataView(nonce.buffer).setUint32(NONCE_PREFIX_BYTES, index, false);   // [7..10] big-endian
+  nonce[11] = isLast ? 1 : 0;                                               // [11]
+  return nonce;
+}
+
+function concatChunks(chunks) {
+  let total = 0;
+  for (const c of chunks) total += c.length;
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) { out.set(c, off); off += c.length; }
+  return out;
+}
+
+async function streamEncryptBytes(bytes, dek, aadString, segmentSize, prefix) {
+  const aad   = utf8(aadString);
+  const total = Math.max(1, Math.ceil(bytes.length / segmentSize));   // ≥1 (covers empty file)
+  const parts = [];
+  for (let i = 0; i < total; i++) {
+    const start  = i * segmentSize;
+    const end    = Math.min(start + segmentSize, bytes.length);
+    const isLast = i === total - 1;
+    const ct = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv: streamNonce(prefix, i, isLast), additionalData: aad },
+      dek, bytes.subarray(start, end),
+    );
+    parts.push(new Uint8Array(ct));
+  }
+  return { ciphertext: concatChunks(parts), totalSegments: total };
+}
+
+async function streamDecryptBytes(cipherBytes, dek, aadString, segmentSize, totalSegments, prefix) {
+  const aad       = utf8(aadString);
+  const ctSegment = segmentSize + GCM_TAG_BYTES;
+  const out       = [];
+  let   offset    = 0;
+  for (let i = 0; i < totalSegments; i++) {
+    const isLast    = i === totalSegments - 1;
+    const remaining = cipherBytes.length - offset;
+    const take      = isLast ? remaining : ctSegment;
+    if (take <= 0 || take > remaining) throw new Error("Truncated or malformed stream.");
+    let pt;
+    try {
+      pt = await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv: streamNonce(prefix, i, isLast), additionalData: aad },
+        dek, cipherBytes.subarray(offset, offset + take),
+      );
+    } catch {
+      throw new Error("Stream segment authentication failed (tampered or reordered).");
+    }
+    out.push(new Uint8Array(pt));
+    offset += take;
+  }
+  if (offset !== cipherBytes.length) throw new Error("Unexpected trailing data after final segment.");
+  return concatChunks(out);
+}
+
+/**
+ * KEY-MODE streaming seal (cloud). Same DEK-wrapping + encMeta as v2; chunked body.
+ * @returns {{ ciphertext: ArrayBuffer, metadata: object }}
+ */
+export async function sealFileStreamWithKey(file, masterKey, storageKey, { segmentSize = DEFAULT_SEGMENT } = {}) {
+  const bytes     = new Uint8Array(await file.arrayBuffer());   // whole buffer for now
+  const dek       = await generateDEK();
+  const aadString = `v${STREAM_VERSION}|key|${storageKey}`;
+  const prefix    = randomBytes(NONCE_PREFIX_BYTES);
+
+  const { ciphertext, totalSegments } = await streamEncryptBytes(bytes, dek, aadString, segmentSize, prefix);
+
+  // Encrypted file metadata — identical layout/AAD to v2.
+  const metaIV   = randomBytes(IV_BYTES);
+  const privMeta = buildPrivateMeta(file, file.size);
+  const encMeta  = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: metaIV, additionalData: utf8(aadString) },
+    dek, utf8(JSON.stringify(privMeta)),
+  );
+
+  const dekWrapIV  = randomBytes(IV_BYTES);
+  const wrappedDEK = await wrapKeyWithKey(dek, masterKey, dekWrapIV);
+
+  const metadata = {
+    v:          STREAM_VERSION,
+    mode:       "key",
+    alg:        STREAM_ALG,
+    dekWrapIV:  bufferToBase64(dekWrapIV),
+    wrappedDEK: bufferToBase64(wrappedDEK),
+    stream:     { noncePrefix: bufferToBase64(prefix), segmentSize, totalSegments },
+    metaIV:     bufferToBase64(metaIV),
+    encMeta:    bufferToBase64(new Uint8Array(encMeta)),
+  };
+  return { ciphertext: ciphertext.buffer, metadata };
+}
+
+/**
+ * KEY-MODE streaming open (cloud). Verifies every segment; returns the full plaintext.
+ * (A streaming variant that writes to disk incrementally lands in the next slice.)
+ */
+export async function openFileStreamWithKey(ciphertext, metadata, masterKey, storageKey) {
+  if (metadata.mode !== "key" || metadata.alg !== STREAM_ALG) {
+    throw new Error("Not a key-mode streaming envelope.");
+  }
+  const aadString = `v${metadata.v}|key|${storageKey}`;
+
+  let dek;
+  try {
+    dek = await unwrapDEK(base64ToBuffer(metadata.wrappedDEK), masterKey, base64ToBuffer(metadata.dekWrapIV));
+  } catch {
+    throw new Error("Could not unwrap the file key — vault key mismatch.");
+  }
+
+  const { noncePrefix, segmentSize, totalSegments } = metadata.stream;
+  const plaintext = await streamDecryptBytes(
+    new Uint8Array(ciphertext), dek, aadString, segmentSize, totalSegments, base64ToBuffer(noncePrefix),
+  );
+
+  let meta;
+  try {
+    const buf = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: base64ToBuffer(metadata.metaIV), additionalData: utf8(aadString) },
+      dek, base64ToBuffer(metadata.encMeta),
+    );
+    meta = JSON.parse(fromUtf8(buf));
+  } catch {
+    throw new Error("Metadata authentication failed.");
+  }
+
+  return { plaintext, name: meta.originalName, mimeType: meta.mimeType, size: meta.size };
+}
+
+/**
+ * Streaming decrypt — pulls ciphertext from a ReadableStream and hands each
+ * decrypted segment to `onPlaintext`, so peak memory is ~one segment regardless
+ * of file size. Used for large downloads written straight to disk.
+ *
+ * @param {ReadableStream<Uint8Array>} cipherStream
+ * @param {object}    metadata    v3 key-mode envelope
+ * @param {CryptoKey} masterKey
+ * @param {string}    storageKey
+ * @param {(chunk: Uint8Array) => (void | Promise<void>)} onPlaintext
+ */
+export async function decryptStreamToSink(cipherStream, metadata, masterKey, storageKey, onPlaintext) {
+  if (metadata.mode !== "key" || metadata.alg !== STREAM_ALG) {
+    throw new Error("Not a key-mode streaming envelope.");
+  }
+  const aad = utf8(`v${metadata.v}|key|${storageKey}`);
+
+  let dek;
+  try {
+    dek = await unwrapDEK(base64ToBuffer(metadata.wrappedDEK), masterKey, base64ToBuffer(metadata.dekWrapIV));
+  } catch {
+    throw new Error("Could not unwrap the file key — vault key mismatch.");
+  }
+
+  const prefix    = base64ToBuffer(metadata.stream.noncePrefix);
+  const segSize   = metadata.stream.segmentSize;
+  const total     = metadata.stream.totalSegments;
+  const ctSegment = segSize + GCM_TAG_BYTES;
+
+  const reader = cipherStream.getReader();
+  let buf  = new Uint8Array(0);
+  let done = false;
+
+  const pull = async () => {
+    const { value, done: d } = await reader.read();
+    if (d) { done = true; return; }
+    const merged = new Uint8Array(buf.length + value.length);
+    merged.set(buf, 0);
+    merged.set(value, buf.length);
+    buf = merged;
+  };
+
+  const decryptSeg = async (index, isLast, bytes) => {
+    try {
+      const pt = await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv: streamNonce(prefix, index, isLast), additionalData: aad },
+        dek, bytes,
+      );
+      return new Uint8Array(pt);
+    } catch {
+      throw new Error("Stream segment authentication failed (tampered, reordered, or truncated).");
+    }
+  };
+
+  try {
+    for (let i = 0; i < total; i++) {
+      const isLast = i === total - 1;
+      if (!isLast) {
+        while (buf.length < ctSegment && !done) await pull();
+        if (buf.length < ctSegment) throw new Error("Truncated stream (segment underflow).");
+        await onPlaintext(await decryptSeg(i, false, buf.subarray(0, ctSegment)));
+        buf = buf.slice(ctSegment);                 // drop consumed bytes
+      } else {
+        while (!done) await pull();                 // remaining bytes are the final segment
+        await onPlaintext(await decryptSeg(i, true, buf));
+        buf = new Uint8Array(0);
+      }
+    }
+  } finally {
+    try { reader.releaseLock(); } catch { /* ignore */ }
+  }
+}
+
+// ─────────────────────────────────────────────
 //  PASSWORD-MODE pipeline  (local export — self-contained, portable)
 // ─────────────────────────────────────────────
 
@@ -555,6 +785,49 @@ export async function recoverWithKeyAndReset(keyvault, recoveryKeyString, newPas
   const newParams              = params ?? keyvault.kdf ?? KDF_DEFAULTS;
   const { fields, sessionMK }  = await rewrapMasterKeyForPassword(masterKey, newPassword, newParams);
   return { keyvault: { ...keyvault, ...fields }, masterKey: sessionMK };
+}
+
+// ─────────────────────────────────────────────
+//  Passkey escrow — Master Key wrapped under a WebAuthn PRF-derived secret
+//
+//  The authenticator's PRF (a.k.a. hmac-secret) extension yields a stable,
+//  high-entropy 32-byte output for a given (credential, salt). We use it exactly
+//  like the recovery key: imported directly as an AES-GCM wrapping key around a
+//  copy of the Master Key. A passkey block therefore lets the user unlock the
+//  vault with biometrics / a security key, with no server and no standing secret.
+// ─────────────────────────────────────────────
+
+/**
+ * @param {CryptoKey}  masterKey  extractable Master Key
+ * @param {Uint8Array} prfOutput  32 bytes from the authenticator PRF extension
+ * @returns {{ wrapIV: string, wrappedMK: string }}
+ */
+export async function wrapMasterKeyWithPRF(masterKey, prfOutput) {
+  if (!(prfOutput instanceof Uint8Array) || prfOutput.length !== RECOVERY_BYTES) {
+    throw new Error("Passkey PRF output must be 32 bytes.");
+  }
+  const wrapKey = await importWrappingKeyFromBytes(prfOutput);
+  const wrapIV  = randomBytes(IV_BYTES);
+  const wrapped = await wrapKeyWithKey(masterKey, wrapKey, wrapIV);
+  return { wrapIV: bufferToBase64(wrapIV), wrappedMK: bufferToBase64(wrapped) };
+}
+
+/**
+ * @param {{wrapIV:string, wrappedMK:string}} block
+ * @param {Uint8Array} prfOutput  32 bytes from the authenticator PRF extension
+ * @param {boolean}    extractable
+ * @returns {Promise<CryptoKey>} the Master Key
+ */
+export async function unwrapMasterKeyWithPRF(block, prfOutput, extractable = false) {
+  if (!block?.wrappedMK) throw new Error("No passkey record on this vault.");
+  const wrapKey = await importWrappingKeyFromBytes(prfOutput);
+  try {
+    return await unwrapMasterKey(
+      base64ToBuffer(block.wrappedMK), wrapKey, base64ToBuffer(block.wrapIV), extractable,
+    );
+  } catch {
+    throw new Error("This passkey could not unlock the vault (wrong passkey or corrupted record).");
+  }
 }
 
 export function getSharingPublicKey(keyvault) {

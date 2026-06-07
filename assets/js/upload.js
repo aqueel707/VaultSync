@@ -1,15 +1,17 @@
 /**
- * upload.js
- * ─────────
+ * upload.js  (key-mode / v3 streaming)
+ * ──────────────────────────
  * Page controller for upload.html.
- * Handles file selection, password input, encryption, and upload.
- * Delegates all crypto to crypto-utils.js and all storage to storage-manager.js.
+ * Encrypts each file under the account's VAULT MASTER KEY (no per-file password)
+ * and uploads ciphertext + encrypted metadata.
+ * Crypto → crypto-utils.js, storage → storage-manager.js, master key → vault.js.
  */
 
 import { requireAuth, navigateTo, markLoggedOut } from "./router.js";
-import { logoutUser }              from "./auth.js";
-import { encryptFileWithPassword } from "./crypto-utils.js";
-import * as storageManager         from "./storage-manager.js";
+import { logoutUser }      from "./auth.js";
+import { sealFileStreamWithKey } from "./crypto-utils.js";
+import * as storageManager from "./storage-manager.js";
+import * as vault          from "./vault.js";
 
 // ─── Boot ─────────────────────────────────────────────────────────────────
 
@@ -23,11 +25,6 @@ const $ = (id) => document.getElementById(id);
 const dropZone        = $("drop-zone");
 const fileInput       = $("file-input");
 const selectedFilesEl = $("selected-files");
-const encPassword     = $("enc-password");
-const togglePassBtn   = $("toggle-enc-pass");
-const strengthWrap    = $("strength-wrap");
-const strengthFill    = $("strength-fill");
-const strengthLabel   = $("strength-label");
 const btnUpload       = $("btn-upload");
 const progressSection = $("upload-progress");
 const progressFill    = $("progress-fill");
@@ -43,7 +40,12 @@ let selectedFiles = [];
 // ─── Init ─────────────────────────────────────────────────────────────────
 
 renderStorageBadge();
-document.getElementById("user-email").textContent = user.email;
+$("user-email").textContent = user.email;
+
+// Warn early if the vault isn't unlocked (e.g. after a Firebase password reset).
+vault.getMasterKey().then((mk) => {
+  if (!mk) showToast("Your vault is locked. Please sign out and sign in again.", "error");
+});
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -81,39 +83,8 @@ function renderStorageBadge() {
 }
 
 function updateUploadBtn() {
-  btnUpload.disabled = !(selectedFiles.length > 0 && encPassword.value.length > 0);
+  btnUpload.disabled = selectedFiles.length === 0;
 }
-
-// ─── Password strength ────────────────────────────────────────────────────
-
-function getStrength(pw) {
-  let score = 0;
-  if (pw.length >= 8)          score++;
-  if (pw.length >= 14)         score++;
-  if (/[A-Z]/.test(pw))        score++;
-  if (/[0-9]/.test(pw))        score++;
-  if (/[^A-Za-z0-9]/.test(pw)) score++;
-  const labels = ["Weak", "Weak", "Fair", "Good", "Strong", "Strong"];
-  const colors = ["#ff4d6d","#ff4d6d","#f7c948","#f7c948","#00e5a0","#00e5a0"];
-  return { label: labels[score], color: colors[score], pct: (score / 5) * 100 };
-}
-
-encPassword.addEventListener("input", () => {
-  const pw = encPassword.value;
-  strengthWrap.hidden = !pw;
-  if (!pw) { updateUploadBtn(); return; }
-  const { label, color, pct } = getStrength(pw);
-  strengthFill.style.width      = `${pct}%`;
-  strengthFill.style.background = color;
-  strengthLabel.textContent     = label;
-  updateUploadBtn();
-});
-
-// ─── Toggle password visibility ───────────────────────────────────────────
-
-togglePassBtn?.addEventListener("click", () => {
-  encPassword.type = encPassword.type === "password" ? "text" : "password";
-});
 
 // ─── File selection ───────────────────────────────────────────────────────
 
@@ -145,7 +116,7 @@ function renderSelectedFiles() {
     const item = document.createElement("div");
     item.className = "selected-file-item";
 
-    // Safe DOM — textContent only, no innerHTML with filename
+    // Safe DOM — textContent only, never innerHTML with a filename.
     const nameSpan = document.createElement("span");
     nameSpan.className   = "file-name";
     nameSpan.textContent = f.name;
@@ -164,9 +135,10 @@ function renderSelectedFiles() {
 btnUpload.addEventListener("click", handleUpload);
 
 async function handleUpload() {
-  const password = encPassword.value;
-  if (!password)             return showToast("Please enter an encryption password.", "error");
   if (!selectedFiles.length) return showToast("Please select at least one file.", "error");
+
+  const masterKey = await vault.getMasterKey();
+  if (!masterKey) return showToast("Your vault is locked. Please sign out and sign in again.", "error");
 
   setLoading(btnUpload, true);
 
@@ -178,11 +150,10 @@ async function handleUpload() {
 
     try {
       updateProgress(5, `${prefix} — Encrypting…`);
-      const { ciphertext, metadata } = await encryptFileWithPassword(file, password);
+      const storageKey = storageManager.generateStorageKey();   // also the AAD binding
+      const { ciphertext, metadata } = await sealFileStreamWithKey(file, masterKey, storageKey);
 
       updateProgress(30, `${prefix} — Uploading…`);
-      const storageKey = storageManager.generateStorageKey();
-
       await storageManager.uploadEncryptedFile(
         user.uid, storageKey, ciphertext, metadata,
         (pct, step) => updateProgress(30 + Math.round(pct * 0.65), `${prefix} — ${step}`),
@@ -201,9 +172,6 @@ async function handleUpload() {
     const dest = storageManager.getMode() === "user" ? "your bucket" : "app storage";
     updateProgress(100, "All uploads complete.");
     showToast(`${ok} file(s) encrypted & uploaded to ${dest}. 🔒`);
-    // Reset form
-    encPassword.value         = "";
-    strengthWrap.hidden       = true;
     selectedFiles             = [];
     selectedFilesEl.innerHTML = "";
     fileInput.value           = "";

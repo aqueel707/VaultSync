@@ -9,9 +9,11 @@
 
 import {
   sealFileWithPassword, openFileWithPassword,
-  sealFileWithKey, openFileWithKey, openMetadataWithKey,
+  sealFileWithKey, openFileWithKey, openMetadataWithKey, generateMasterKey,
+  sealFileStreamWithKey, openFileStreamWithKey, decryptStreamToSink,
   createVault, unlockVault, unlockVaultWithRecovery, changePassword,
   recoverWithKeyAndReset,
+  wrapMasterKeyWithPRF, unwrapMasterKeyWithPRF,
   getSharingPublicKey, unwrapSharingPrivateKey,
   unwrapFileDEK, wrapDEKForRecipient, unwrapSharedDEK, openFileWithSharedDEK, publicKeyFingerprint,
   encryptFileWithPassword,
@@ -250,6 +252,120 @@ async function run() {
     const noRec = await createVault(PW, { withRecovery: false });
     await expectThrow("recovery-reset refused when no recovery configured", () =>
       recoverWithKeyAndReset(noRec.keyvault, recoveryKey, NEWPW));
+  }
+
+  console.log("\n── passkey escrow (WebAuthn PRF wrap) ──");
+  {
+    // Simulate the authenticator's PRF output with 32 random bytes.
+    const prf  = crypto.getRandomValues(new Uint8Array(32));
+    const prf2 = crypto.getRandomValues(new Uint8Array(32));
+    const sk   = "passkey-key";
+    const mk   = await generateMasterKey();                  // extractable, as at enrollment
+    const file = makeFile(BODY, "secret.bin", "application/octet-stream");
+    const { ciphertext, metadata } = await sealFileWithKey(file, mk, sk);
+
+    const block = await wrapMasterKeyWithPRF(mk, prf);
+    eq("passkey block carries wrappedMK", typeof block.wrappedMK, "string");
+
+    const mkBack = await unwrapMasterKeyWithPRF(block, prf);  // non-extractable session key
+    sameBytes((await openFileWithKey(ciphertext, metadata, mkBack, sk)).plaintext, BODY)
+      ? ok("passkey-unwrapped key opens the file") : bad("passkey-unwrapped key opens the file");
+    await expectThrow("passkey session key is non-extractable", () =>
+      crypto.subtle.exportKey("raw", mkBack));
+
+    await expectThrow("wrong PRF output rejected", () => unwrapMasterKeyWithPRF(block, prf2));
+    await expectThrow("PRF output must be 32 bytes", () =>
+      wrapMasterKeyWithPRF(mk, crypto.getRandomValues(new Uint8Array(16))));
+
+    const mkExt = await unwrapMasterKeyWithPRF(block, prf, true);  // extractable copy path
+    eq("extractable passkey unwrap exports 32 bytes",
+       new Uint8Array(await crypto.subtle.exportKey("raw", mkExt)).length, 32);
+  }
+
+  console.log("\n── streaming envelope (v3, chunked) ──");
+  {
+    const masterKey = await generateMasterKey();
+    const sk  = "stream-key";
+    const seg = 256;                                  // small segments → multiple chunks
+    const big = new Uint8Array(700);                  // 700 / 256 → 3 segments
+    for (let i = 0; i < big.length; i++) big[i] = (i * 7) & 0xff;
+    const file = makeFile(big, "big.bin", "application/octet-stream");
+
+    const { ciphertext, metadata } = await sealFileStreamWithKey(file, masterKey, sk, { segmentSize: seg });
+    eq("v3 alg recorded", metadata.alg, "AES-256-GCM-STREAM");
+    eq("v3 total segments computed", metadata.stream.totalSegments, 3);
+    eq("v3 ciphertext = body + per-segment tags", ciphertext.byteLength, 700 + 3 * 16);
+    eq("v3 no plaintext filename", metadata.originalName, undefined);
+
+    const out = await openFileStreamWithKey(ciphertext, metadata, masterKey, sk);
+    eq("v3 round-trip filename", out.name, "big.bin");
+    sameBytes(out.plaintext, big) ? ok("v3 round-trip body matches") : bad("v3 round-trip body matches");
+
+    const listMeta = await openMetadataWithKey(metadata, masterKey, sk);
+    eq("v3 listing via openMetadataWithKey", listMeta.originalName, "big.bin");
+
+    await expectThrow("v3 wrong storageKey (relocation) rejected", () =>
+      openFileStreamWithKey(ciphertext, metadata, masterKey, "other-key"));
+
+    const foreign = await generateMasterKey();
+    await expectThrow("v3 foreign master key rejected", () =>
+      openFileStreamWithKey(ciphertext, metadata, foreign, sk));
+
+    {
+      const u = new Uint8Array(ciphertext.slice(0)); u[0] ^= 0x01;
+      await expectThrow("v3 body bit-flip rejected", () =>
+        openFileStreamWithKey(u.buffer, metadata, masterKey, sk));
+    }
+    {
+      const ctSeg = seg + 16;
+      const u  = new Uint8Array(ciphertext.slice(0));
+      const s0 = u.slice(0, ctSeg), s1 = u.slice(ctSeg, 2 * ctSeg);
+      u.set(s1, 0); u.set(s0, ctSeg);                 // swap segment 0 ↔ 1
+      await expectThrow("v3 segment reorder rejected", () =>
+        openFileStreamWithKey(u.buffer, metadata, masterKey, sk));
+    }
+    {
+      const truncated = ciphertext.slice(0, 2 * (seg + 16));   // drop final segment
+      await expectThrow("v3 truncated stream rejected", () =>
+        openFileStreamWithKey(truncated, metadata, masterKey, sk));
+    }
+    {
+      const ef = makeFile(new Uint8Array(0), "empty.bin", "application/octet-stream");
+      const r  = await sealFileStreamWithKey(ef, masterKey, "ek", { segmentSize: seg });
+      eq("v3 empty file → 1 segment", r.metadata.stream.totalSegments, 1);
+      const o = await openFileStreamWithKey(r.ciphertext, r.metadata, masterKey, "ek");
+      eq("v3 empty round-trip is empty", o.plaintext.length, 0);
+    }
+
+    // streaming reader: feed ciphertext in tiny 100-byte chunks (boundaries fall
+    // mid-segment) and confirm it reassembles + decrypts correctly.
+    {
+      const mkStream = (bytes, chunk) => {
+        let off = 0;
+        return new ReadableStream({
+          pull(c) {
+            if (off >= bytes.length) { c.close(); return; }
+            const end = Math.min(off + chunk, bytes.length);
+            c.enqueue(bytes.slice(off, end));
+            off = end;
+          },
+        });
+      };
+      const collected = [];
+      await decryptStreamToSink(mkStream(new Uint8Array(ciphertext), 100), metadata, masterKey, sk,
+        (chunk) => { collected.push(chunk); });
+      let n = 0; for (const c of collected) n += c.length;
+      const joined = new Uint8Array(n); let p = 0;
+      for (const c of collected) { joined.set(c, p); p += c.length; }
+      sameBytes(joined, big)
+        ? ok("v3 streaming decrypt reassembles across chunk boundaries")
+        : bad("v3 streaming decrypt reassembles across chunk boundaries");
+
+      await expectThrow("v3 streaming decrypt rejects a tampered segment", () => {
+        const u = new Uint8Array(ciphertext.slice(0)); u[0] ^= 0x01;
+        return decryptStreamToSink(mkStream(u, 100), metadata, masterKey, sk, () => {});
+      });
+    }
   }
 
   console.log("\n── legacy v1 back-compat (cloud interim) ──");
